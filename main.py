@@ -1,5 +1,9 @@
-"""Streamlit Cloud entry alias — use Main file path: main.py"""
-from pathlib import Path
-import runpy
+"""
+Streamlit Cloud entry point.
+Prefer Main file path: app.py
+This file exists so either app.py or main.py works.
+"""
+from __future__ import annotations
 
-runpy.run_path(str(Path(__file__).resolve().with_name("app.py")), run_name="__main__")
+# Importing app.py runs the full DealShark UI (top-level Streamlit calls).
+import app as _dealshark_app  # noqa: F401
