@@ -10,6 +10,10 @@ from pathlib import Path
 
 import streamlit as st
 
+from secrets_bootstrap import bootstrap_secrets
+
+bootstrap_secrets()
+
 from comms import notify_deal_signed, send_offer_sms, signing_url
 from contract_gen import generate_assignment_pdf
 from crm import add_lead as crm_add_lead
