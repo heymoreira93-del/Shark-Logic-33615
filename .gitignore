@@ -1,0 +1,9 @@
+.env
+deals.db
+tampa_leads.db
+crm.db
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+contracts/*.pdf
+!contracts/.gitkeep
