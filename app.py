@@ -34,7 +34,7 @@ from db import (
 from email_blast import alert_buyers, email_configured
 from generator import generate_contract
 from hunter import skip_trace
-from payments import create_checkout_session, emd_amount_dollars, stripe_configured
+from payments import create_checkout_session, emd_amount_dollars, stripe_configured, stripe_mode
 from rehab import (
     apply_tampa_risk_adjustments,
     calculate_rehab,
@@ -622,11 +622,17 @@ with calc_tab:
 
     emd = emd_amount_dollars()
     gate_on = stripe_configured()
+    mode = stripe_mode()
     st.caption(
         f"Sheets: {'ON' if sheets_configured() else 'local CRM'} · "
-        f"Stripe EMD: {'ON ($' + f'{emd:,.0f})' if gate_on else 'OFF'} · "
+        f"Stripe EMD: {'ON ($' + f'{emd:,.0f}, ' + mode + ')' if gate_on else 'OFF'} · "
         f"Email blast: {'ON' if email_configured() else 'OFF'}"
     )
+    if mode == "live":
+        st.caption(
+            "Stripe is on LIVE keys. If checkout fails with 'cannot make live charges', "
+            "finish Stripe Activate / identity, or use sk_test_ until approved."
+        )
 
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
@@ -691,7 +697,8 @@ with calc_tab:
                     if checkout_url:
                         st.info(f"EMD lock link: {checkout_url}")
                     else:
-                        st.warning("Stripe session failed — check STRIPE_SECRET_KEY.")
+                        err = getattr(create_checkout_session, "last_error", "") or "check STRIPE_SECRET_KEY"
+                        st.error(f"Stripe session failed: {err}")
                 else:
                     st.session_state.paid = True
 
@@ -768,15 +775,25 @@ with calc_tab:
             )
         elif st.button("Create EMD Checkout Link", use_container_width=True):
             if address.strip():
-                url = create_checkout_session(
-                    address=address.strip(),
-                    assignment_fee=float(assignment_fee),
-                )
+                try:
+                    url = create_checkout_session(
+                        address=address.strip(),
+                        assignment_fee=float(assignment_fee),
+                    )
+                except Exception as exc:
+                    url = None
+                    st.error(f"Stripe error: {exc}")
                 if url:
                     st.session_state.checkout_url = url
                     st.rerun()
                 else:
-                    st.error("Could not create Stripe session.")
+                    err = getattr(create_checkout_session, "last_error", "") or "Could not create Stripe session."
+                    st.error(err)
+                    if stripe_mode() == "live":
+                        st.info(
+                            "Your account cannot take LIVE charges yet. "
+                            "Switch STRIPE_SECRET_KEY to sk_test_... (Test mode) or finish Stripe Activate."
+                        )
             else:
                 st.error("Enter address first.")
     else:
