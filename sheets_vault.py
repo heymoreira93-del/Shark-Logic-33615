@@ -26,19 +26,43 @@ SHEET_COLUMNS = [
 ]
 
 
+def _ensure_secrets() -> None:
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+
+
 def sheets_configured() -> bool:
+    _ensure_secrets()
     url = (os.getenv("GOOGLE_SHEETS_URL") or "").strip()
+    # Reject template URL so Go-Live does not show Sheets ON with placeholders
+    if "YOUR_SHEET_ID" in url:
+        url = ""
     try:
         import streamlit as st
 
         secrets = getattr(st, "secrets", None)
         if secrets is not None:
             if "connections" in secrets and "gsheets" in secrets["connections"]:
-                return True
-            if secrets.get("GOOGLE_SHEETS_URL"):
+                try:
+                    g = secrets["connections"]["gsheets"]
+                    sheet = g.get("spreadsheet") if hasattr(g, "get") else g["spreadsheet"]
+                    sheet_s = str(sheet or "").strip()
+                    if sheet_s and "YOUR_SHEET_ID" not in sheet_s:
+                        return True
+                except Exception:
+                    pass
+            try:
+                su = secrets.get("GOOGLE_SHEETS_URL") if hasattr(secrets, "get") else None
+            except Exception:
+                su = None
+            if su and "YOUR_SHEET_ID" not in str(su):
                 return True
             if "gcp_service_account" in secrets:
-                return bool(url or secrets.get("GOOGLE_SHEETS_URL"))
+                return bool(url or (su and "YOUR_SHEET_ID" not in str(su)))
     except Exception:
         pass
     return bool(url and os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"))

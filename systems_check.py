@@ -46,10 +46,17 @@ _PLACEHOLDERS = frozenset(
         "rk_test_...",
         "rk_live_...",
         "your_gmail_app_password",
+        "xxxx_gmail_app_password_xxxx",
+        "sk_live_xxxxxxxx",
         "+1xxxxxxxxxx",
+        "+1XXXXXXXXXX",
         "ACxxxxxxxx",
         "you@gmail.com",
+        "deals@yourdomain.com",
         "buyer1@example.com, buyer2@example.com",
+        "paste_rentcast_key",
+        "paste_twilio_auth_token",
+        "paste_vendor_key",
     }
 )
 
@@ -109,6 +116,7 @@ def _env(key: str) -> str:
                 "email": {
                     "EMAIL_USER": ("user", "EMAIL_USER"),
                     "EMAIL_PASS": ("pass", "password", "EMAIL_PASS"),
+                    "EMAIL_FROM": ("from", "EMAIL_FROM"),
                     "BUYER_EMAILS": ("buyers", "BUYER_EMAILS"),
                 },
             }
@@ -310,25 +318,36 @@ def sheets_status() -> dict[str, Any]:
 
 
 def email_status() -> dict[str, Any]:
+    try:
+        from email_blast import email_configured
+
+        ready = email_configured()
+    except Exception:
+        ready = False
     missing = _missing(["EMAIL_USER", "EMAIL_PASS", "BUYER_EMAILS"])
-    # BUYER_EMAILS may be present but empty after split — double-check
-    if _has("BUYER_EMAILS") and not (_env("BUYER_EMAILS") or "").strip():
+    # BUYER_EMAILS may be present but empty / example-only after split
+    buyers = [
+        e for e in (_env("BUYER_EMAILS") or "").replace(";", ",").split(",") if e.strip()
+    ]
+    if not buyers and "BUYER_EMAILS" not in missing:
+        missing.append("BUYER_EMAILS")
+    if buyers and all("example.com" in b for b in buyers):
         if "BUYER_EMAILS" not in missing:
             missing.append("BUYER_EMAILS")
-    ready = not missing
     notes: list[str] = []
-    if missing:
-        notes.append(f"Missing: {', '.join(missing)}")
+    if not ready:
+        if missing:
+            notes.append(f"Missing: {', '.join(missing)}")
         notes.append("Need EMAIL_USER, EMAIL_PASS (Gmail App Password), BUYER_EMAILS")
+        notes.append("Rejects example.com buyers and placeholder App Passwords.")
     else:
-        buyers = [e for e in _env("BUYER_EMAILS").replace(";", ",").split(",") if e.strip()]
         notes.append(f"Configured for {len(buyers)} buyer recipient(s)")
     notes.append("Use a deals@ mailbox + App Password so blasts don't hit spam.")
     return {
         "ready": ready,
         "label": "Buyer Email Blast",
         "notes": notes,
-        "missing": missing,
+        "missing": missing if not ready else [],
         "mode": "live" if ready else "off",
     }
 

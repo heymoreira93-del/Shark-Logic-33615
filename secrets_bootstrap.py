@@ -151,6 +151,7 @@ def bootstrap_secrets() -> None:
             "email": {
                 "EMAIL_USER": ("user", "EMAIL_USER"),
                 "EMAIL_PASS": ("pass", "password", "EMAIL_PASS"),
+                "EMAIL_FROM": ("from", "EMAIL_FROM"),
                 "BUYER_EMAILS": ("buyers", "BUYER_EMAILS"),
             },
         }

@@ -22,11 +22,25 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _ensure_secrets() -> None:
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+
+
 def people_data_configured() -> bool:
-    return bool(
-        (os.getenv("PEOPLE_DATA_API_URL") or "").strip()
-        and (os.getenv("PEOPLE_DATA_API_KEY") or "").strip()
-    )
+    _ensure_secrets()
+    url = (os.getenv("PEOPLE_DATA_API_URL") or "").strip()
+    key = (os.getenv("PEOPLE_DATA_API_KEY") or "").strip()
+    if not url or not key:
+        return False
+    # Empty-string placeholders from secrets.toml.example
+    if key in {"paste_vendor_key", "your_key_here"}:
+        return False
+    return True
 
 
 def _first_phone(data: dict[str, Any]) -> str:
@@ -66,6 +80,7 @@ def enrich_phone(
     """
     Try people-data vendor for a cell. Returns {phone, source, error}.
     """
+    _ensure_secrets()
     if not people_data_configured():
         return {
             "phone": "",

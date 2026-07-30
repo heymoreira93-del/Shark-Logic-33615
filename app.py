@@ -770,7 +770,10 @@ with calc_tab:
                         "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
                     }
                 )
-                st.success(msg_s if ok_s else msg_s)
+                if ok_s:
+                    st.success(msg_s)
+                else:
+                    st.error(msg_s)
 
     if log_deal:
         if not address.strip():
@@ -789,7 +792,10 @@ with calc_tab:
                     "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
                 }
             )
-            st.success(msg)
+            if _ok:
+                st.success(msg)
+            else:
+                st.error(msg)
 
     # Paywall
     paid = bool(st.session_state.paid) or not gate_on
