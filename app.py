@@ -80,6 +80,33 @@ init_tampa_db()
 init_crm_db()
 
 # ---------------------------------------------------------------------------
+# Navigation helpers
+# ---------------------------------------------------------------------------
+def _go_to_main_page() -> None:
+    """Leave seller/signing (or other) overlay and show the main DealShark UI."""
+    try:
+        if "deal_id" in st.query_params:
+            del st.query_params["deal_id"]
+    except Exception:
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+    st.session_state.pop("pipeline_deal_id", None)
+    st.session_state.pop("show_agreement_preview", None)
+    st.session_state.pop("wr_selected_lead_id", None)
+    st.rerun()
+
+
+def _back_button(key: str, label: str = "← Back") -> bool:
+    """Render a Back control. Returns True if clicked (caller may also handle)."""
+    if st.button(label, key=key, use_container_width=False):
+        _go_to_main_page()
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Seller View (?deal_id=)
 # ---------------------------------------------------------------------------
 query_params = st.query_params
@@ -88,9 +115,11 @@ if "deal_id" in query_params:
     if isinstance(deal_id, list):
         deal_id = deal_id[0]
     deal = get_deal(str(deal_id))
+    _back_button("sign_back_top", "← Back to main")
     st.header("Real Estate Purchase Agreement")
     if not deal:
         st.error("Deal not found.")
+        _back_button("sign_back_missing", "← Back to main")
         st.stop()
     st.info(f"Property: {deal['address']}")
     st.success(f"Offer Amount: ${deal['price']:,.2f}")
@@ -107,6 +136,7 @@ if "deal_id" in query_params:
             )
     if deal.get("status") == "SIGNED":
         st.success(f"Document already signed by **{deal.get('signature') or 'Seller'}**.")
+        _back_button("sign_back_already", "← Back to main")
         st.stop()
     st.write("By typing your name below, you agree to the terms of the purchase agreement.")
     sig = st.text_input("Type Full Legal Name (Electronic Signature)")
@@ -119,12 +149,18 @@ if "deal_id" in query_params:
                     signature_name=sig.strip(),
                     deal_id=str(deal_id),
                 )
-                st.balloons()
-                st.success("Document Signed! We will contact you shortly to open escrow.")
+                st.session_state["flash_signed"] = {
+                    "address": deal["address"],
+                    "signature": sig.strip(),
+                    "deal_id": str(deal_id),
+                }
+                # Exit signing screen → main Calculator / command center
+                _go_to_main_page()
             else:
                 st.error("Could not sign this deal (it may already be signed).")
         else:
             st.error("Please sign the document to proceed.")
+    _back_button("sign_back_bottom", "← Back to main")
     st.stop()
 
 # ---------------------------------------------------------------------------
@@ -143,12 +179,22 @@ for key, default in {
     "year_built": None,
     "avg_sqft_price": 0.0,
     "data_source": "manual",
+    "show_agreement_preview": False,
+    "pipeline_deal_id": "",
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
 st.title("DealShark — Tampa Shark Mode")
 st.caption("Live RentCast · Flood Guard · War Room · Bulk SMS. Built for the 813.")
+
+_flash = st.session_state.pop("flash_signed", None)
+if _flash:
+    st.balloons()
+    st.success(
+        f"Purchase agreement signed by **{_flash.get('signature') or 'Seller'}** "
+        f"for {_flash.get('address') or 'the property'}. Escrow outreach next."
+    )
 
 # Sidebar (shared)
 st.sidebar.header("Tampa Strategy")
@@ -571,8 +617,26 @@ with calc_tab:
         else:
             pdf_path, deal_id = _build_offer_artifacts()
             _persist_war_room_lead("Offer Sent")
-            st.success(f"PDF ready: `{pdf_path}`")
+            st.session_state.show_agreement_preview = True
+            st.session_state.last_pdf_path = pdf_path
+            st.session_state.last_deal_id = deal_id
+            st.rerun()
+
+    if st.session_state.get("show_agreement_preview") and st.session_state.get("last_pdf_path"):
+        st.markdown("---")
+        prev_cols = st.columns([1, 4])
+        with prev_cols[0]:
+            if st.button("← Back", key="agreement_preview_back"):
+                st.session_state.show_agreement_preview = False
+                st.rerun()
+        with prev_cols[1]:
+            st.subheader("Agreement preview")
+        pdf_path = str(st.session_state.last_pdf_path)
+        deal_id = str(st.session_state.get("last_deal_id") or "")
+        st.success(f"PDF ready: `{pdf_path}`")
+        if deal_id:
             st.info(f"Seller link: {signing_url(deal_id)}")
+        if Path(pdf_path).exists():
             with open(pdf_path, "rb") as f:
                 st.download_button(
                     "Download PDF",
@@ -580,6 +644,7 @@ with calc_tab:
                     file_name=Path(pdf_path).name,
                     mime="application/pdf",
                     use_container_width=True,
+                    key="agreement_preview_dl",
                 )
 
     if fire_sms:
@@ -886,24 +951,58 @@ with calc_tab:
     if not deals:
         st.info("No contract deals yet.")
     else:
-        for d in deals:
+        _detail_id = str(st.session_state.get("pipeline_deal_id") or "")
+        _detail = next((d for d in deals if str(d.get("id")) == _detail_id), None) if _detail_id else None
+        if _detail:
+            d = _detail
             heat = d.get("lead_temp") or "Cold"
-            with st.expander(
-                f"{heat} · {d.get('address')} · ${float(d.get('price') or 0):,.0f}",
-                expanded=False,
-            ):
-                st.write(f"ID `{d['id']}` · {d.get('seller_name')} · {d.get('seller_phone')}")
-                st.code(signing_url(d["id"]))
-                note = st.text_area("Add note", key=f"note_{d['id']}", height=70)
-                if st.button("Log Note", key=f"log_{d['id']}"):
-                    if append_note(d["id"], note):
-                        st.rerun()
-                new_temp = st.selectbox(
-                    "Lead Heat",
-                    list(LEAD_TEMPS),
-                    index=list(LEAD_TEMPS).index(heat) if heat in LEAD_TEMPS else 0,
-                    key=f"temp_{d['id']}",
-                )
-                if st.button("Save Heat", key=f"save_temp_{d['id']}"):
-                    update_lead_temp(d["id"], new_temp)
+            back_c, title_c = st.columns([1, 5])
+            with back_c:
+                if st.button("← Back", key="pipeline_deal_back"):
+                    st.session_state.pipeline_deal_id = ""
                     st.rerun()
+            with title_c:
+                st.markdown(
+                    f"**Deal detail** · {heat} · {d.get('address')} · "
+                    f"${float(d.get('price') or 0):,.0f}"
+                )
+            st.write(f"ID `{d['id']}` · {d.get('seller_name')} · {d.get('seller_phone')}")
+            st.write(f"Status: **{d.get('status') or 'PENDING'}**")
+            st.code(signing_url(d["id"]))
+            pdf_path = d.get("pdf_path") or ""
+            if pdf_path and Path(pdf_path).exists():
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "View agreement PDF",
+                        f,
+                        file_name=Path(pdf_path).name,
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key=f"pipeline_pdf_{d['id']}",
+                    )
+            note = st.text_area("Add note", key=f"note_{d['id']}", height=70)
+            if st.button("Log Note", key=f"log_{d['id']}"):
+                if append_note(d["id"], note):
+                    st.rerun()
+            new_temp = st.selectbox(
+                "Lead Heat",
+                list(LEAD_TEMPS),
+                index=list(LEAD_TEMPS).index(heat) if heat in LEAD_TEMPS else 0,
+                key=f"temp_{d['id']}",
+            )
+            if st.button("Save Heat", key=f"save_temp_{d['id']}"):
+                update_lead_temp(d["id"], new_temp)
+                st.rerun()
+        else:
+            for d in deals:
+                heat = d.get("lead_temp") or "Cold"
+                row_c1, row_c2 = st.columns([4, 1])
+                with row_c1:
+                    st.write(
+                        f"{heat} · {d.get('address')} · ${float(d.get('price') or 0):,.0f} · "
+                        f"`{d['id']}`"
+                    )
+                with row_c2:
+                    if st.button("Open", key=f"open_deal_{d['id']}", use_container_width=True):
+                        st.session_state.pipeline_deal_id = str(d["id"])
+                        st.rerun()

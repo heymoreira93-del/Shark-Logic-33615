@@ -43,6 +43,12 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
     st.title("Tampa War Room")
     st.caption("Every Tampa lead · flood risk · offer status · bulk follow-up. Open at 9 AM.")
 
+    selected_id = st.session_state.get("wr_selected_lead_id")
+    if selected_id is not None:
+        if st.button("← Back", key="wr_detail_back"):
+            st.session_state.wr_selected_lead_id = None
+            st.rerun()
+
     leads = get_all_leads()
     stats = pipeline_stats(leads)
 
@@ -153,94 +159,122 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
             "(your cell, E.164 — not a +1555 placeholder)."
         )
 
+    selected_id = st.session_state.get("wr_selected_lead_id")
+    selected = None
+    if selected_id is not None:
+        try:
+            selected = next((r for r in leads if int(r["id"]) == int(selected_id)), None)
+        except (TypeError, ValueError):
+            selected = None
+        if selected is None:
+            st.session_state.wr_selected_lead_id = None
+            selected_id = None
+
+    def _render_lead_actions(r: dict) -> None:
+        flood_tag = " · FLOOD" if r.get("flood_risk") else ""
+        st.markdown(
+            f"### #{r['id']} · {r.get('status')} · {r.get('address')} · "
+            f"MAO ${float(r.get('mao') or 0):,.0f}{flood_tag}"
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            new_status = st.selectbox(
+                "Status",
+                list(STATUSES),
+                index=list(STATUSES).index(r["status"])
+                if r.get("status") in STATUSES
+                else 0,
+                key=f"wr_status_{r['id']}",
+            )
+            if st.button("Update Status", key=f"wr_upd_{r['id']}"):
+                update_lead_status(int(r["id"]), new_status)
+                st.toast(f"#{r['id']} → {new_status}")
+                st.rerun()
+        with c2:
+            st.write(f"**Seller:** {r.get('seller_name') or '—'}")
+            st.write(f"**Risk:** {r.get('risk_level')}")
+            phone_in = st.text_input(
+                "Cell (paste from TruePeopleSearch / Lusha)",
+                value=r.get("seller_phone") or "",
+                key=f"wr_phone_{r['id']}",
+                placeholder="+1813...",
+            )
+            if st.button("Save Phone", key=f"wr_save_phone_{r['id']}"):
+                update_lead_phone(int(r["id"]), phone_in)
+                st.toast(f"#{r['id']} phone saved")
+                st.rerun()
+        with c3:
+            phone = (phone_in or r.get("seller_phone") or "").strip()
+            call_col, sms_col = st.columns(2)
+            with call_col:
+                if st.button("Click to Call", key=f"wr_call_{r['id']}", use_container_width=True):
+                    if not phone:
+                        st.error("No phone on this lead.")
+                    elif not voice_configured():
+                        st.error(
+                            "Set TWILIO_AGENT_PHONE or NOTIFY_PHONE to your real cell "
+                            "(E.164, e.g. +18135551212) - placeholders like +1555... are blocked."
+                        )
+                    else:
+                        result = click_to_call(
+                            phone,
+                            label=str(r.get("address") or r["id"]),
+                        )
+                        if result.get("ok"):
+                            mark_contacted(int(r["id"]))
+                            st.success(result.get("message") or "Calling...")
+                            st.caption(
+                                f"Agent SID `{result.get('agent_sid')}` · "
+                                f"Lead SID `{result.get('lead_sid') or '—'}` · "
+                                f"mode={result.get('mode')}"
+                            )
+                        else:
+                            st.error(result.get("error") or "Call failed")
+                            st.caption(
+                                "Need a real agent cell + Twilio Voice webhook on your number. "
+                                "Trial accounts: verify both phones in Twilio Console."
+                            )
+            with sms_col:
+                if st.button("SMS", key=f"wr_sms_{r['id']}", type="primary", use_container_width=True):
+                    if not phone:
+                        st.error("No phone on this lead.")
+                    else:
+                        sid = send_followup_sms(
+                            phone,
+                            r.get("address") or "",
+                            seller_name=r.get("seller_name") or "",
+                            buyer_name=buyer_name,
+                            mao=float(r.get("mao") or 0),
+                            status=new_status or r.get("status") or "",
+                            zip_code=str(r.get("zip_code") or ""),
+                        )
+                        if sid:
+                            mark_contacted(
+                                int(r["id"]),
+                                status="Follow-up Sent"
+                                if new_status != "Lis Pendens"
+                                else "Lis Pendens",
+                            )
+                            st.success(f"SMS sent. SID: `{sid}`")
+                            st.rerun()
+                        else:
+                            st.error("SMS failed — check Twilio keys / From number (+1...).")
+                            st.caption("Trial Twilio: recipient must be a verified number.")
+
+    if selected is not None:
+        _render_lead_actions(selected)
+        return
+
     for r in leads:
         flood_tag = " · FLOOD" if r.get("flood_risk") else ""
         label = (
             f"#{r['id']} · {r.get('status')} · {r.get('address')} · "
             f"MAO ${float(r.get('mao') or 0):,.0f}{flood_tag}"
         )
-        with st.expander(label, expanded=False):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                new_status = st.selectbox(
-                    "Status",
-                    list(STATUSES),
-                    index=list(STATUSES).index(r["status"])
-                    if r.get("status") in STATUSES
-                    else 0,
-                    key=f"wr_status_{r['id']}",
-                )
-                if st.button("Update Status", key=f"wr_upd_{r['id']}"):
-                    update_lead_status(int(r["id"]), new_status)
-                    st.toast(f"#{r['id']} → {new_status}")
-                    st.rerun()
-            with c2:
-                st.write(f"**Seller:** {r.get('seller_name') or '—'}")
-                st.write(f"**Risk:** {r.get('risk_level')}")
-                phone_in = st.text_input(
-                    "Cell (paste from TruePeopleSearch / Lusha)",
-                    value=r.get("seller_phone") or "",
-                    key=f"wr_phone_{r['id']}",
-                    placeholder="+1813...",
-                )
-                if st.button("Save Phone", key=f"wr_save_phone_{r['id']}"):
-                    update_lead_phone(int(r["id"]), phone_in)
-                    st.toast(f"#{r['id']} phone saved")
-                    st.rerun()
-            with c3:
-                phone = (phone_in or r.get("seller_phone") or "").strip()
-                call_col, sms_col = st.columns(2)
-                with call_col:
-                    if st.button("Click to Call", key=f"wr_call_{r['id']}", use_container_width=True):
-                        if not phone:
-                            st.error("No phone on this lead.")
-                        elif not voice_configured():
-                            st.error(
-                                "Set TWILIO_AGENT_PHONE or NOTIFY_PHONE to your real cell "
-                                "(E.164, e.g. +18135551212) - placeholders like +1555... are blocked."
-                            )
-                        else:
-                            result = click_to_call(
-                                phone,
-                                label=str(r.get("address") or r["id"]),
-                            )
-                            if result.get("ok"):
-                                mark_contacted(int(r["id"]))
-                                st.success(result.get("message") or "Calling...")
-                                st.caption(
-                                    f"Agent SID `{result.get('agent_sid')}` · "
-                                    f"Lead SID `{result.get('lead_sid') or '—'}` · "
-                                    f"mode={result.get('mode')}"
-                                )
-                            else:
-                                st.error(result.get("error") or "Call failed")
-                                st.caption(
-                                    "Need a real agent cell + Twilio Voice webhook on your number. "
-                                    "Trial accounts: verify both phones in Twilio Console."
-                                )
-                with sms_col:
-                    if st.button("SMS", key=f"wr_sms_{r['id']}", type="primary", use_container_width=True):
-                        if not phone:
-                            st.error("No phone on this lead.")
-                        else:
-                            sid = send_followup_sms(
-                                phone,
-                                r.get("address") or "",
-                                seller_name=r.get("seller_name") or "",
-                                buyer_name=buyer_name,
-                                mao=float(r.get("mao") or 0),
-                                status=new_status or r.get("status") or "",
-                                zip_code=str(r.get("zip_code") or ""),
-                            )
-                            if sid:
-                                mark_contacted(
-                                    int(r["id"]),
-                                    status="Follow-up Sent"
-                                    if new_status != "Lis Pendens"
-                                    else "Lis Pendens",
-                                )
-                                st.success(f"SMS sent. SID: `{sid}`")
-                                st.rerun()
-                            else:
-                                st.error("SMS failed — check Twilio keys / From number (+1...).")
-                                st.caption("Trial Twilio: recipient must be a verified number.")
+        list_c1, list_c2 = st.columns([5, 1])
+        with list_c1:
+            st.write(label)
+        with list_c2:
+            if st.button("Open", key=f"wr_open_{r['id']}", use_container_width=True):
+                st.session_state.wr_selected_lead_id = int(r["id"])
+                st.rerun()

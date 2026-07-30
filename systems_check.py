@@ -287,6 +287,9 @@ def sheets_status() -> dict[str, Any]:
     notes: list[str] = []
     if not ready:
         has_url = _has("GOOGLE_SHEETS_URL")
+        url_val = _env("GOOGLE_SHEETS_URL")
+        if "YOUR_SHEET_ID" in (url_val or ""):
+            has_url = False
         has_conn = False
         has_sa = False
         try:
@@ -294,18 +297,26 @@ def sheets_status() -> dict[str, Any]:
 
             secrets = getattr(st, "secrets", None)
             if secrets is not None:
-                has_conn = "connections" in secrets and "gsheets" in secrets["connections"]
+                if "connections" in secrets and "gsheets" in secrets["connections"]:
+                    try:
+                        g = secrets["connections"]["gsheets"]
+                        sheet = g.get("spreadsheet") if hasattr(g, "get") else g["spreadsheet"]
+                        sheet_s = str(sheet or "").strip()
+                        has_conn = bool(sheet_s) and "YOUR_SHEET_ID" not in sheet_s
+                    except Exception:
+                        has_conn = False
                 has_sa = "gcp_service_account" in secrets
         except Exception:
             pass
         if not has_url and not has_conn:
             missing.append("GOOGLE_SHEETS_URL / [connections.gsheets]")
-        if not has_sa and not has_conn:
+        if not has_sa:
             missing.append("[gcp_service_account] or st-gsheets connection")
         notes.append(
             "Needs [connections.gsheets] spreadsheet URL + service account shared on tab 'Leads'."
         )
         notes.append("Falls back to local CRM if Sheets is off.")
+        notes.append("Placeholder YOUR_SHEET_ID does not count as configured.")
     else:
         notes.append("Sheets vault configured — writes go to Google + local CRM mirror.")
     return {
