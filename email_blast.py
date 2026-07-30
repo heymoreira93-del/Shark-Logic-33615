@@ -8,26 +8,101 @@ import os
 import smtplib
 from email.message import EmailMessage
 
+# Canonical env names + Cloud-secret aliases (must match systems_check / bootstrap)
+_EMAIL_ALIASES: dict[str, tuple[str, ...]] = {
+    "EMAIL_USER": ("EMAIL_USER", "GMAIL_USER", "SMTP_USER"),
+    "EMAIL_PASS": ("EMAIL_PASS", "EMAIL_PASSWORD", "GMAIL_APP_PASSWORD", "SMTP_PASS"),
+    "BUYER_EMAILS": ("BUYER_EMAILS", "BUYER_EMAIL", "CASH_BUYER_EMAILS"),
+    "EMAIL_FROM": ("EMAIL_FROM",),
+}
+
+_PLACEHOLDERS = frozenset(
+    {
+        "",
+        "your_gmail_app_password",
+        "xxxx_gmail_app_password_xxxx",
+        "you@gmail.com",
+        "buyer1@example.com, buyer2@example.com",
+    }
+)
+
+
+def _ensure_secrets() -> None:
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+
+
+def _env(key: str) -> str:
+    """Resolve EMAIL_* from os.environ, aliases, then st.secrets (incl. [email])."""
+    _ensure_secrets()
+    for alt in _EMAIL_ALIASES.get(key, (key,)):
+        val = (os.getenv(alt) or "").strip()
+        if val:
+            if alt != key:
+                os.environ[key] = val
+            return val
+    try:
+        import streamlit as st
+
+        secrets = getattr(st, "secrets", None)
+        if secrets is None:
+            return ""
+        for alt in _EMAIL_ALIASES.get(key, (key,)):
+            try:
+                raw = secrets.get(alt) if hasattr(secrets, "get") else secrets[alt]
+            except Exception:
+                continue
+            if raw is not None and str(raw).strip():
+                cleaned = str(raw).strip().strip('"').strip("'")
+                os.environ[key] = cleaned
+                return cleaned
+        try:
+            block = secrets["email"]
+        except Exception:
+            return ""
+        nested_map = {
+            "EMAIL_USER": ("user", "EMAIL_USER"),
+            "EMAIL_PASS": ("pass", "password", "EMAIL_PASS"),
+            "BUYER_EMAILS": ("buyers", "BUYER_EMAILS"),
+            "EMAIL_FROM": ("from", "EMAIL_FROM"),
+        }
+        for nested_key in nested_map.get(key, ()):
+            try:
+                raw = block[nested_key]
+            except Exception:
+                continue
+            if raw is not None and str(raw).strip():
+                cleaned = str(raw).strip().strip('"').strip("'")
+                os.environ[key] = cleaned
+                return cleaned
+    except Exception:
+        pass
+    return ""
+
 
 def _buyer_list() -> list[str]:
-    raw = (os.getenv("BUYER_EMAILS") or "").strip()
+    raw = _env("BUYER_EMAILS")
     if not raw:
         return []
     return [e.strip() for e in raw.replace(";", ",").split(",") if e.strip()]
 
 
 def email_configured() -> bool:
-    user = (os.getenv("EMAIL_USER") or "").strip()
-    password = (os.getenv("EMAIL_PASS") or "").strip()
-    placeholders = {
-        "",
-        "your_gmail_app_password",
-        "xxxx_gmail_app_password_xxxx",
-        "you@gmail.com",
-    }
-    if user in placeholders or password in placeholders:
+    user = _env("EMAIL_USER")
+    password = _env("EMAIL_PASS")
+    if user in _PLACEHOLDERS or password in _PLACEHOLDERS:
         return False
-    return bool(user and password and _buyer_list())
+    buyers = _buyer_list()
+    if not buyers:
+        return False
+    # Reject leftover example buyer list
+    if all(b in _PLACEHOLDERS or "example.com" in b for b in buyers):
+        return False
+    return bool(user and password and buyers)
 
 
 def alert_buyers(
@@ -43,9 +118,9 @@ def alert_buyers(
     Uses Gmail SMTP + App Password (EMAIL_USER / EMAIL_PASS).
     """
     buyers = _buyer_list()
-    user = (os.getenv("EMAIL_USER") or "").strip()
-    password = (os.getenv("EMAIL_PASS") or "").strip()
-    from_addr = (os.getenv("EMAIL_FROM") or user).strip()
+    user = _env("EMAIL_USER")
+    password = _env("EMAIL_PASS")
+    from_addr = (_env("EMAIL_FROM") or user).strip()
 
     if not buyers:
         return False, "No BUYER_EMAILS in secrets/.env"

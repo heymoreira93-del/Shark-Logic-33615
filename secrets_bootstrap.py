@@ -44,6 +44,15 @@ SECRET_KEYS = (
     "PEOPLE_DATA_API_KEY",
 )
 
+# Top-level alias → canonical env (Cloud paste typos)
+SECRET_ALIASES: dict[str, tuple[str, ...]] = {
+    "EMAIL_USER": ("GMAIL_USER", "SMTP_USER"),
+    "EMAIL_PASS": ("EMAIL_PASSWORD", "GMAIL_APP_PASSWORD", "SMTP_PASS"),
+    "BUYER_EMAILS": ("BUYER_EMAIL", "CASH_BUYER_EMAILS"),
+    "STRIPE_SECRET_KEY": ("STRIPE_KEY", "STRIPE_API_KEY"),
+    "APP_BASE_URL": ("BASE_URL", "STREAMLIT_APP_URL"),
+}
+
 
 def is_localhost_base_url(url: str | None) -> bool:
     """True when URL is empty or clearly a local-only host."""
@@ -101,6 +110,19 @@ def bootstrap_secrets() -> None:
             except Exception:
                 continue
             _set(key, val)
+
+        # Map top-level aliases → canonical names when canonical unset
+        for canonical, aliases in SECRET_ALIASES.items():
+            if os.getenv(canonical):
+                continue
+            for alt in aliases:
+                try:
+                    val = secrets.get(alt) if hasattr(secrets, "get") else secrets[alt]
+                except Exception:
+                    continue
+                if val is not None and str(val).strip():
+                    _set(canonical, val)
+                    break
 
         # Flatten [connections.gsheets].spreadsheet → GOOGLE_SHEETS_URL when unset
         try:
