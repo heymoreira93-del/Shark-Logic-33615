@@ -1,8 +1,11 @@
 """
 Skip-trace hunter — locate owner from property address.
 
-v1 uses mock data so the UI works offline. Set SKIP_TRACE_API_URL +
-SKIP_TRACE_API_KEY in .env to hit a real provider (BatchData, AbstractAPI, etc.).
+Provider order:
+1. Built-in RentCast (owner name + mailing) — uses RENTCAST_API_KEY
+2. External SKIP_TRACE_API_URL + SKIP_TRACE_API_KEY
+3. Offline mock
+Then optional PEOPLE_DATA_API_* cell enrichment (RocketReach / Lusha / PropertyRadar style).
 """
 
 from __future__ import annotations
@@ -13,6 +16,9 @@ from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
+
+from phone_enrich import enrich_phone, people_data_configured
+from skip_provider import has_provider, rentcast_skip_trace
 
 load_dotenv()
 
@@ -27,33 +33,57 @@ def skip_trace(address: str) -> dict[str, Any] | None:
     if not address:
         return None
 
+    hit: dict[str, Any] | None = None
+
+    if has_provider():
+        hit = rentcast_skip_trace(address)
+
     api_url = os.getenv("SKIP_TRACE_API_URL", "").strip()
     api_key = os.getenv("SKIP_TRACE_API_KEY", "").strip()
 
-    if api_url and api_key:
+    if not hit and api_url and api_key:
         try:
-            url = api_url.format(address=quote(address), api_key=api_key)
-            if "{address}" not in api_url:
-                # Generic query-param style fallback
+            if "{address}" in api_url:
+                url = api_url.format(address=quote(address), api_key=api_key)
+            else:
                 sep = "&" if "?" in api_url else "?"
                 url = f"{api_url}{sep}address={quote(address)}&api_key={api_key}"
-            response = requests.get(url, timeout=20)
+            response = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "X-Api-Key": api_key},
+                timeout=20,
+            )
             response.raise_for_status()
             data = response.json()
-            return {
+            hit = {
                 "owner_name": data.get("owner_name") or data.get("name") or "",
                 "phone": data.get("phone") or data.get("mobile") or "",
                 "email": data.get("email") or "",
                 "mailing_address": data.get("mailing_address") or data.get("mailing") or address,
+                "source": "external",
             }
         except Exception as exc:
             print(f"Skip trace API error: {exc}")
-            return None
 
-    # Offline mock — swap for a real provider when keys are set
-    return {
-        "owner_name": "John Doe",
-        "phone": "555-0199",
-        "email": "johndoe@example.com",
-        "mailing_address": address,
-    }
+    if not hit:
+        hit = {
+            "owner_name": "John Doe (mock - add RENTCAST_API_KEY for live owner)",
+            "phone": "",
+            "email": "johndoe@example.com",
+            "mailing_address": address,
+            "source": "mock",
+        }
+
+    if not (hit.get("phone") or "").strip() and people_data_configured():
+        enrich = enrich_phone(
+            owner_name=str(hit.get("owner_name") or ""),
+            address=address,
+            mailing_address=str(hit.get("mailing_address") or ""),
+        )
+        if enrich.get("phone"):
+            hit["phone"] = enrich["phone"]
+            hit["phone_source"] = enrich.get("source") or "people_data"
+        else:
+            hit["phone_error"] = enrich.get("error") or ""
+
+    return hit

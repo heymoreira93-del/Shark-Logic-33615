@@ -15,18 +15,31 @@ from db import create_deal
 load_dotenv()
 
 
+def _normalize_e164(phone: str) -> str:
+    """Fix common typos like ++1... and bare 10-digit US numbers."""
+    p = (phone or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    if p.startswith("++"):
+        p = "+" + p[2:]
+    if p and not p.startswith("+") and p.isdigit():
+        if len(p) == 10:
+            p = "+1" + p
+        elif len(p) == 11 and p.startswith("1"):
+            p = "+" + p
+    return p
+
+
 def _client() -> Client:
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    account_sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+    auth_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
     if not account_sid or not auth_token:
-        raise RuntimeError("Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN in .env")
+        raise RuntimeError("Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN in .env / secrets")
     return Client(account_sid, auth_token)
 
 
 def _from_number() -> str:
-    from_phone = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+    from_phone = _normalize_e164(os.getenv("TWILIO_PHONE_NUMBER", ""))
     if not from_phone:
-        raise RuntimeError("Missing TWILIO_PHONE_NUMBER in .env")
+        raise RuntimeError("Missing TWILIO_PHONE_NUMBER in .env / secrets")
     return from_phone
 
 
@@ -54,7 +67,7 @@ def send_offer_sms(
 
     Returns (message_sid, deal_id). Either may be None on failure.
     """
-    to_phone = (to_phone or "").strip()
+    to_phone = _normalize_e164(to_phone)
     if not to_phone:
         print("Error firing SMS: empty phone number")
         return None, deal_id
@@ -91,8 +104,12 @@ def send_offer_sms(
         return message.sid, deal_id
     except Exception as exc:
         print(f"Error firing SMS: {exc}")
+        # Stash last error for UI (Streamlit session may read via getattr)
+        send_offer_sms.last_error = str(exc)  # type: ignore[attr-defined]
         return None, deal_id
 
+
+send_offer_sms.last_error = ""  # type: ignore[attr-defined]
 
 def notify_deal_signed(
     *,
@@ -102,7 +119,7 @@ def notify_deal_signed(
     deal_id: str,
 ) -> Optional[str]:
     """Alert your phone when a seller click-signs."""
-    notify_to = os.getenv("NOTIFY_PHONE", "").strip()
+    notify_to = _normalize_e164(os.getenv("NOTIFY_PHONE", ""))
     if not notify_to:
         return None
     body = (
@@ -134,7 +151,7 @@ def send_followup_sms(
     """
     War Room follow-up. Lis Pendens + 33615 get specialized scripts.
     """
-    to_phone = (to_phone or "").strip()
+    to_phone = _normalize_e164(to_phone)
     if not to_phone:
         print("Error follow-up SMS: empty phone")
         return None

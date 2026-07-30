@@ -14,6 +14,7 @@ from database import (
     get_pending_leads,
     mark_contacted,
     pipeline_stats,
+    update_lead_phone,
     update_lead_status,
 )
 
@@ -165,12 +166,21 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
                     st.toast(f"#{r['id']} → {new_status}")
                     st.rerun()
             with c2:
-                st.write(f"**Phone:** {r.get('seller_phone') or '—'}")
                 st.write(f"**Seller:** {r.get('seller_name') or '—'}")
                 st.write(f"**Risk:** {r.get('risk_level')}")
+                phone_in = st.text_input(
+                    "Cell (paste from TruePeopleSearch / Lusha)",
+                    value=r.get("seller_phone") or "",
+                    key=f"wr_phone_{r['id']}",
+                    placeholder="+1813...",
+                )
+                if st.button("Save Phone", key=f"wr_save_phone_{r['id']}"):
+                    update_lead_phone(int(r["id"]), phone_in)
+                    st.toast(f"#{r['id']} phone saved")
+                    st.rerun()
             with c3:
                 if st.button("Send Follow-up SMS", key=f"wr_sms_{r['id']}", type="primary"):
-                    phone = (r.get("seller_phone") or "").strip()
+                    phone = (phone_in or r.get("seller_phone") or "").strip()
                     if not phone:
                         st.error("No phone on this lead.")
                     else:
@@ -193,4 +203,5 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
                             st.success(f"Follow-up sent. SID: `{sid}`")
                             st.rerun()
                         else:
-                            st.error("SMS failed — check Twilio `.env` keys.")
+                            st.error("SMS failed — check Twilio keys / From number format (+1...).")
+                            st.caption("Trial Twilio: recipient must be a verified number.")

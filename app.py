@@ -43,8 +43,13 @@ from rehab import (
     shark_mao,
     tampa_hazard_check,
 )
+from seller_factory import render_seller_factory
 from sheets_vault import log_to_sheets, read_leads, sheets_configured
-from tampa_config import DEFAULT_CLOSING_COST_PCT, HIGH_RISK_FLOOD_HIT, MANUAL_FLOOD_MAO_HIT
+from systems_check import email_status, render_systems_check, stripe_status
+from tampa_config import DEFAULT_CLOSING_COST_PCT, MANUAL_FLOOD_MAO_HIT
+
+# Alias: High Risk Flood Zone AE hit ($15k) — same as MANUAL_FLOOD_MAO_HIT
+HIGH_RISK_FLOOD_HIT = MANUAL_FLOOD_MAO_HIT
 from tampa_leads import mock_tampa_offmarket_leads, prepare_recent_filings_parse
 from war_room import render_war_room
 
@@ -209,13 +214,46 @@ if not _stale.empty:
 else:
     st.sidebar.success("All leads are fresh. Go get new ones.")
 
-calc_tab, war_tab = st.tabs(["Calculator", "Tampa War Room"])
+st.sidebar.markdown("---")
+with st.sidebar.expander("Stack Status (Go-Live)", expanded=False):
+    for row in (
+        __import__("systems_check", fromlist=["full_stack_report"]).full_stack_report()
+    ):
+        mark = "ON" if row["ready"] else "OFF"
+        st.caption(f"{mark} · {row['label']}")
+
+calc_tab, hunt_tab, war_tab, status_tab = st.tabs(
+    ["Calculator", "Seller Factory", "Tampa War Room", "Go-Live Check"]
+)
+
+# ===========================================================================
+# TAB: Seller Factory (create leads)
+# ===========================================================================
+with hunt_tab:
+    render_seller_factory(fee=float(fee), market_factor=float(market_factor))
 
 # ===========================================================================
 # TAB: War Room
 # ===========================================================================
 with war_tab:
     render_war_room(buyer_name=buyer_name.strip() or "DealShark")
+
+# ===========================================================================
+# TAB: Go-Live Check
+# ===========================================================================
+with status_tab:
+    render_systems_check()
+    st.markdown(
+        """
+**Go-Live checklist**
+1. Stripe: use live key (`sk_live_...`) + `APP_BASE_URL` with no trailing slash
+2. Gmail: 2FA + App Password for `EMAIL_USER` / `EMAIL_PASS` + `BUYER_EMAILS`
+3. Prefer **email blast** until Twilio 10DLC is registered (trial SMS is nearly useless)
+4. Call Hillsborough title (Sunbelt / Bay Title) — confirm they handle assignments
+5. Paste their wire info into Secrets: `WIRE_BANK`, `WIRE_ROUTING`, `WIRE_ACCOUNT`, `TITLE_COMPANY_NAME`
+6. Optional phones: `PEOPLE_DATA_API_URL` + `PEOPLE_DATA_API_KEY` (RocketReach / Lusha / PropertyRadar style)
+        """
+    )
 
 # ===========================================================================
 # TAB: Calculator
@@ -279,7 +317,16 @@ with calc_tab:
                     st.session_state.seller_name = hit.get("owner_name") or ""
                     st.session_state.seller_phone = hit.get("phone") or ""
                     st.session_state.seller_email = hit.get("email") or ""
-                    st.success(f"Located: **{st.session_state.seller_name}**")
+                    src = hit.get("source") or "unknown"
+                    st.success(f"Located: **{st.session_state.seller_name}** · source=`{src}`")
+                    if hit.get("mailing_address"):
+                        st.caption(f"Mailing: {hit.get('mailing_address')}")
+                    if not hit.get("phone"):
+                        st.info(
+                            "Owner name pulled from RentCast. "
+                            "No cell on file — paste mobile manually for SMS "
+                            "(people-data phone vendors are separate from BatchData)."
+                        )
                 else:
                     st.error("Skip trace returned nothing.")
 
@@ -540,7 +587,12 @@ with calc_tab:
                 st.success(f"SMS sent. SID: `{sid}`")
                 st.code(signing_url(deal_id or ""))
             else:
-                st.error("SMS failed. Check Twilio keys in `.env`.")
+                err = getattr(send_offer_sms, "last_error", "") or "unknown Twilio error"
+                st.error(f"SMS failed: {err}")
+                st.caption(
+                    "From-number must be E.164 like +18886099605 (one plus). "
+                    "Trial accounts can only text verified numbers."
+                )
                 if deal_id:
                     st.info(f"Deal saved. Seller link: {signing_url(deal_id)}")
 
@@ -597,7 +649,7 @@ with calc_tab:
 
     closer_a, closer_b, closer_c = st.columns(3)
     with closer_a:
-        blast = st.button("BLAST TO BUYERS & GENERATE", type="primary", use_container_width=True)
+        blast = st.button("VERIFY & BLAST", type="primary", use_container_width=True)
     with closer_b:
         log_deal = st.button("Log Deal (Google Vault)", use_container_width=True)
     with closer_c:
@@ -610,62 +662,82 @@ with calc_tab:
         if not address.strip():
             st.error("Enter a property address first.")
         else:
-            checkout_url = ""
-            if gate_on:
-                checkout_url = create_checkout_session(
-                    address=address.strip(),
-                    assignment_fee=float(assignment_fee),
-                ) or ""
-                st.session_state.checkout_url = checkout_url
-                if checkout_url:
-                    st.info(f"EMD lock link: {checkout_url}")
-                else:
-                    st.warning("Stripe session failed — check STRIPE_SECRET_KEY.")
-            else:
-                st.session_state.paid = True
-                st.warning("Stripe not configured — PDF unlocked for local/wire flow.")
-
-            path = generate_assignment_pdf(
-                address.strip(),
-                cash_buyer.strip() or "TBD",
-                float(assignment_fee),
-                assignor_name=buyer_name.strip() or "DealShark Acquisitions",
-                purchase_price=float(offer_price),
-                flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
-            )
-            st.session_state.assign_pdf_path = str(path)
-
-            pay_link = checkout_url or "(wire / unlock after EMD)"
-            if email_configured():
-                ok, msg = alert_buyers(
-                    address.strip(),
-                    float(arv),
-                    float(offer_price),
-                    float(assignment_fee),
-                    pay_link,
-                    flood_risk=bool(high_risk_flood or flood_buffer > 0),
+            stripe_ok = stripe_status()["ready"]
+            email_ok = email_status()["ready"]
+            # Prefer email path until 10DLC; Stripe optional for wire-only
+            if not email_ok and not stripe_ok:
+                st.error(
+                    "VERIFY FAILED: Email and Stripe secrets are both OFF. "
+                    "Paste EMAIL_* and/or STRIPE_SECRET_KEY + APP_BASE_URL in Cloud Secrets."
                 )
-                if ok:
-                    st.success(f"Deal blasted to buyers. {msg}")
-                else:
-                    st.error(msg)
             else:
-                st.info("Email blast skipped — set EMAIL_USER, EMAIL_PASS, BUYER_EMAILS.")
+                if not email_ok:
+                    st.warning(
+                        "Email OFF — blasting skipped. Fix EMAIL_USER / EMAIL_PASS / BUYER_EMAILS. "
+                        "(Preferred over Twilio trial until 10DLC.)"
+                    )
+                if not stripe_ok:
+                    st.warning(
+                        "Stripe OFF — no EMD checkout link. Wire / unlock still available."
+                    )
 
-            ok_s, msg_s = log_to_sheets(
-                {
-                    "name": seller_name.strip() or "Seller",
-                    "address": address.strip(),
-                    "zip_code": zip_guess or extract_zip(address) or "",
-                    "status": "Offered",
-                    "arv": float(arv),
-                    "mao": float(offer_price),
-                    "fee": float(assignment_fee),
-                    "buyer_name": cash_buyer.strip(),
-                    "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
-                }
-            )
-            st.success(msg_s if ok_s else msg_s)
+                checkout_url = ""
+                if gate_on:
+                    checkout_url = create_checkout_session(
+                        address=address.strip(),
+                        assignment_fee=float(assignment_fee),
+                    ) or ""
+                    st.session_state.checkout_url = checkout_url
+                    if checkout_url:
+                        st.info(f"EMD lock link: {checkout_url}")
+                    else:
+                        st.warning("Stripe session failed — check STRIPE_SECRET_KEY.")
+                else:
+                    st.session_state.paid = True
+
+                path = generate_assignment_pdf(
+                    address.strip(),
+                    cash_buyer.strip() or "TBD",
+                    float(assignment_fee),
+                    assignor_name=buyer_name.strip() or "DealShark Acquisitions",
+                    purchase_price=float(offer_price),
+                    flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
+                    emd_amount=float(emd),
+                    closing_date=closing_date,
+                    emd_paid_via_stripe=bool(st.session_state.paid and gate_on),
+                )
+                st.session_state.assign_pdf_path = str(path)
+                st.success("Assignment PDF generated with equitable-interest boilerplate.")
+
+                pay_link = checkout_url or "(wire / unlock after EMD)"
+                if email_ok:
+                    ok, msg = alert_buyers(
+                        address.strip(),
+                        float(arv),
+                        float(offer_price),
+                        float(assignment_fee),
+                        pay_link,
+                        flood_risk=bool(high_risk_flood or flood_buffer > 0),
+                    )
+                    if ok:
+                        st.success(f"VERIFY OK — blasted to buyers. {msg}")
+                    else:
+                        st.error(msg)
+
+                ok_s, msg_s = log_to_sheets(
+                    {
+                        "name": seller_name.strip() or "Seller",
+                        "address": address.strip(),
+                        "zip_code": zip_guess or extract_zip(address) or "",
+                        "status": "Offered",
+                        "arv": float(arv),
+                        "mao": float(offer_price),
+                        "fee": float(assignment_fee),
+                        "buyer_name": cash_buyer.strip(),
+                        "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
+                    }
+                )
+                st.success(msg_s if ok_s else msg_s)
 
     if log_deal:
         if not address.strip():
@@ -731,6 +803,9 @@ with calc_tab:
                     assignor_name=buyer_name.strip() or "DealShark Acquisitions",
                     purchase_price=float(offer_price),
                     flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
+                    emd_amount=float(emd),
+                    closing_date=closing_date,
+                    emd_paid_via_stripe=bool(st.session_state.paid),
                 )
                 st.session_state.assign_pdf_path = str(path)
                 st.rerun()
