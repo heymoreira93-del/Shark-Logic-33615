@@ -17,11 +17,17 @@ def _buyer_list() -> list[str]:
 
 
 def email_configured() -> bool:
-    return bool(
-        (os.getenv("EMAIL_USER") or "").strip()
-        and (os.getenv("EMAIL_PASS") or "").strip()
-        and _buyer_list()
-    )
+    user = (os.getenv("EMAIL_USER") or "").strip()
+    password = (os.getenv("EMAIL_PASS") or "").strip()
+    placeholders = {
+        "",
+        "your_gmail_app_password",
+        "xxxx_gmail_app_password_xxxx",
+        "you@gmail.com",
+    }
+    if user in placeholders or password in placeholders:
+        return False
+    return bool(user and password and _buyer_list())
 
 
 def alert_buyers(

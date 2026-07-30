@@ -51,7 +51,10 @@ def bootstrap_secrets() -> None:
 
         def _set(key: str, val: object) -> None:
             if val is not None and str(val).strip():
-                os.environ[key] = str(val).strip().strip('"').strip("'")
+                cleaned = str(val).strip().strip('"').strip("'")
+                if key == "APP_BASE_URL":
+                    cleaned = cleaned.rstrip("/")
+                os.environ[key] = cleaned
 
         for key in SECRET_KEYS:
             try:
@@ -59,6 +62,15 @@ def bootstrap_secrets() -> None:
             except Exception:
                 continue
             _set(key, val)
+
+        # Flatten [connections.gsheets].spreadsheet → GOOGLE_SHEETS_URL when unset
+        try:
+            gsheets = secrets["connections"]["gsheets"]
+            sheet_url = gsheets.get("spreadsheet") if hasattr(gsheets, "get") else gsheets["spreadsheet"]
+            if sheet_url and not os.getenv("GOOGLE_SHEETS_URL"):
+                _set("GOOGLE_SHEETS_URL", sheet_url)
+        except Exception:
+            pass
 
         # Nested [twilio] / [stripe] / [email] tables (common paste mistake)
         nested = {

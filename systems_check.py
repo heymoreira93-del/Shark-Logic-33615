@@ -1,6 +1,7 @@
 """
 Stack health — Twilio / Stripe / Sheets / Email / RentCast / People-data.
 Surfaces what's live vs what's blocking money today.
+Never prints secret values — only key names and masked phone/mode.
 """
 
 from __future__ import annotations
@@ -22,7 +23,35 @@ _SECRET_ALIASES: dict[str, tuple[str, ...]] = {
         "TWILIO_NUMBER",
         "FROM_NUMBER",
     ),
+    "STRIPE_SECRET_KEY": ("STRIPE_SECRET_KEY", "STRIPE_KEY", "STRIPE_API_KEY"),
+    "APP_BASE_URL": ("APP_BASE_URL", "BASE_URL", "STREAMLIT_APP_URL"),
+    "RENTCAST_API_KEY": ("RENTCAST_API_KEY", "RENTCAST_KEY"),
+    "EMAIL_USER": ("EMAIL_USER", "GMAIL_USER", "SMTP_USER"),
+    "EMAIL_PASS": ("EMAIL_PASS", "EMAIL_PASSWORD", "GMAIL_APP_PASSWORD", "SMTP_PASS"),
+    "BUYER_EMAILS": ("BUYER_EMAILS", "BUYER_EMAIL", "CASH_BUYER_EMAILS"),
 }
+
+_PLACEHOLDERS = frozenset(
+    {
+        "",
+        "your_key_here",
+        "your_sid",
+        "your_sid_here",
+        "your_token",
+        "your_token_here",
+        "your_rentcast_key",
+        "your_auth_token",
+        "sk_test_...",
+        "sk_live_...",
+        "rk_test_...",
+        "rk_live_...",
+        "your_gmail_app_password",
+        "+1xxxxxxxxxx",
+        "ACxxxxxxxx",
+        "you@gmail.com",
+        "buyer1@example.com, buyer2@example.com",
+    }
+)
 
 
 def _refresh_env_from_streamlit() -> None:
@@ -61,26 +90,43 @@ def _env(key: str) -> str:
             if raw is not None and str(raw).strip():
                 os.environ[key] = str(raw).strip()
                 return str(raw).strip()
-        # Nested [twilio] block support
+        # Nested [twilio] / [stripe] / [email] block support
         try:
-            tw = secrets["twilio"]
-            nested_map = {
-                "TWILIO_ACCOUNT_SID": ("account_sid", "sid", "TWILIO_ACCOUNT_SID"),
-                "TWILIO_AUTH_TOKEN": ("auth_token", "token", "TWILIO_AUTH_TOKEN"),
-                "TWILIO_PHONE_NUMBER": (
-                    "phone_number",
-                    "from_number",
-                    "TWILIO_PHONE_NUMBER",
-                ),
+            nested_sections = {
+                "twilio": {
+                    "TWILIO_ACCOUNT_SID": ("account_sid", "sid", "TWILIO_ACCOUNT_SID"),
+                    "TWILIO_AUTH_TOKEN": ("auth_token", "token", "TWILIO_AUTH_TOKEN"),
+                    "TWILIO_PHONE_NUMBER": (
+                        "phone_number",
+                        "from_number",
+                        "TWILIO_PHONE_NUMBER",
+                    ),
+                },
+                "stripe": {
+                    "STRIPE_SECRET_KEY": ("secret_key", "STRIPE_SECRET_KEY", "api_key"),
+                    "APP_BASE_URL": ("app_base_url", "APP_BASE_URL", "base_url"),
+                },
+                "email": {
+                    "EMAIL_USER": ("user", "EMAIL_USER"),
+                    "EMAIL_PASS": ("pass", "password", "EMAIL_PASS"),
+                    "BUYER_EMAILS": ("buyers", "BUYER_EMAILS"),
+                },
             }
-            for nested_key in nested_map.get(key, ()):
+            for section, mapping in nested_sections.items():
+                if key not in mapping:
+                    continue
                 try:
-                    raw = tw[nested_key]
+                    block = secrets[section]
                 except Exception:
                     continue
-                if raw is not None and str(raw).strip():
-                    os.environ[key] = str(raw).strip()
-                    return str(raw).strip()
+                for nested_key in mapping[key]:
+                    try:
+                        raw = block[nested_key]
+                    except Exception:
+                        continue
+                    if raw is not None and str(raw).strip():
+                        os.environ[key] = str(raw).strip()
+                        return str(raw).strip()
         except Exception:
             pass
     except Exception:
@@ -90,17 +136,18 @@ def _env(key: str) -> str:
 
 def _has(key: str) -> bool:
     val = _env(key)
-    return bool(val) and val not in {
-        "your_key_here",
-        "your_sid",
-        "your_sid_here",
-        "your_token",
-        "your_token_here",
-        "your_rentcast_key",
-        "sk_test_...",
-        "your_gmail_app_password",
-        "+1xxxxxxxxxx",
-    }
+    if not val:
+        return False
+    if val in _PLACEHOLDERS:
+        return False
+    # Reject obvious placeholder patterns
+    if val.endswith("...") and ("sk_" in val or "rk_" in val or "AC" in val):
+        return False
+    return True
+
+
+def _missing(keys: list[str]) -> list[str]:
+    return [k for k in keys if not _has(k)]
 
 
 def _normalize_from(phone: str) -> str:
@@ -115,50 +162,95 @@ def _normalize_from(phone: str) -> str:
     return p
 
 
+def _mask_phone(phone: str) -> str:
+    if len(phone) >= 6:
+        return phone[:2] + "****" + phone[-4:]
+    return "+****"
+
+
 def twilio_status() -> dict[str, Any]:
     sid = _has("TWILIO_ACCOUNT_SID")
     token = _has("TWILIO_AUTH_TOKEN")
     from_raw = _env("TWILIO_PHONE_NUMBER")
     from_n = _normalize_from(from_raw)
     ok_from = bool(from_n) and from_n.startswith("+") and not from_n.startswith("++")
+    placeholder_from = from_raw in _PLACEHOLDERS or from_raw.endswith("xxxxxxxxxx")
+    if placeholder_from:
+        ok_from = False
     # Persist normalized from-number so SMS send uses it
     if ok_from and from_n != from_raw:
         os.environ["TWILIO_PHONE_NUMBER"] = from_n
     ready = bool(sid and token and ok_from)
-    notes = []
+    missing: list[str] = []
+    notes: list[str] = []
     if not sid:
+        missing.append("TWILIO_ACCOUNT_SID")
         notes.append("Missing TWILIO_ACCOUNT_SID (must start with AC...)")
     if not token:
+        missing.append("TWILIO_AUTH_TOKEN")
         notes.append("Missing TWILIO_AUTH_TOKEN")
     if not ok_from:
+        missing.append("TWILIO_PHONE_NUMBER")
         notes.append(
             "Missing/invalid TWILIO_PHONE_NUMBER — use E.164 like +18881234567 "
             "(one plus, no spaces)."
         )
     else:
-        # Show masked from number only
-        masked = from_n[:2] + "****" + from_n[-4:] if len(from_n) >= 6 else "+****"
-        notes.append(f"From number OK ({masked})")
+        notes.append(f"From number OK ({_mask_phone(from_n)})")
     notes.append(
-        "Cloud: Settings → Secrets must include the 3 keys as TOP-LEVEL names "
-        "(not only inside a [twilio] table unless you use that format)."
+        "Cloud: paste TOP-LEVEL key names (TWILIO_ACCOUNT_SID=...), then Reboot app."
     )
     notes.append(
-        "Trial accounts can ONLY text Verified Caller IDs. Upgrade / 10DLC for blasts."
+        "Trial SMS only reaches Verified Caller IDs. Register 10DLC for real blasts."
     )
-    return {"ready": ready, "label": "Twilio SMS", "notes": notes}
+    return {
+        "ready": ready,
+        "label": "Twilio SMS",
+        "notes": notes,
+        "missing": missing,
+        "mode": "live" if ready else "off",
+    }
 
 
 def stripe_status() -> dict[str, Any]:
-    ready = _has("STRIPE_SECRET_KEY") and _has("APP_BASE_URL")
-    notes = []
-    if not _has("STRIPE_SECRET_KEY"):
-        notes.append("Missing STRIPE_SECRET_KEY in Cloud Secrets")
-    if not _has("APP_BASE_URL"):
+    from payments import stripe_mode
+
+    key_ok = _has("STRIPE_SECRET_KEY")
+    base_ok = _has("APP_BASE_URL")
+    mode = stripe_mode() if key_ok else "off"
+    # Configured enough to run checkout (test OR live)
+    ready = bool(key_ok and base_ok)
+    missing: list[str] = []
+    notes: list[str] = []
+    if not key_ok:
+        missing.append("STRIPE_SECRET_KEY")
+        notes.append("Missing STRIPE_SECRET_KEY (use sk_live_... for real money)")
+    if not base_ok:
+        missing.append("APP_BASE_URL")
         notes.append("Missing APP_BASE_URL (no trailing slash)")
     else:
-        notes.append(f"APP_BASE_URL={_env('APP_BASE_URL').rstrip('/')}")
-    return {"ready": ready, "label": "Stripe EMD", "notes": notes}
+        base = _env("APP_BASE_URL").rstrip("/")
+        os.environ["APP_BASE_URL"] = base
+        notes.append(f"APP_BASE_URL={base}")
+        if _env("APP_BASE_URL") != base:
+            notes.append("Trailing slash stripped from APP_BASE_URL")
+    if mode == "test":
+        notes.append(
+            "TEST MODE (sk_test_/rk_test_) — no real charges. "
+            "Swap to sk_live_/rk_live_ for production money."
+        )
+    elif mode == "live":
+        notes.append("LIVE MODE — real card charges. Finish Stripe Activate if locked.")
+    elif key_ok:
+        notes.append("Key present but not sk_/rk_ prefix — verify it is a secret key.")
+    return {
+        "ready": ready,
+        "label": "Stripe EMD",
+        "notes": notes,
+        "missing": missing,
+        "mode": mode,
+        "production_ready": mode == "live" and ready,
+    }
 
 
 def sheets_status() -> dict[str, Any]:
@@ -168,46 +260,103 @@ def sheets_status() -> dict[str, Any]:
         ready = sheets_configured()
     except Exception:
         ready = False
-    notes = [
-        "Needs [connections.gsheets] + service account shared on sheet tab 'Leads'.",
-        "Falls back to local CRM if Sheets is off.",
-    ]
-    return {"ready": ready, "label": "Google Sheets Vault", "notes": notes}
+    missing: list[str] = []
+    notes: list[str] = []
+    if not ready:
+        has_url = _has("GOOGLE_SHEETS_URL")
+        has_conn = False
+        has_sa = False
+        try:
+            import streamlit as st
+
+            secrets = getattr(st, "secrets", None)
+            if secrets is not None:
+                has_conn = "connections" in secrets and "gsheets" in secrets["connections"]
+                has_sa = "gcp_service_account" in secrets
+        except Exception:
+            pass
+        if not has_url and not has_conn:
+            missing.append("GOOGLE_SHEETS_URL / [connections.gsheets]")
+        if not has_sa and not has_conn:
+            missing.append("[gcp_service_account] or st-gsheets connection")
+        notes.append(
+            "Needs [connections.gsheets] spreadsheet URL + service account shared on tab 'Leads'."
+        )
+        notes.append("Falls back to local CRM if Sheets is off.")
+    else:
+        notes.append("Sheets vault configured — writes go to Google + local CRM mirror.")
+    return {
+        "ready": ready,
+        "label": "Google Sheets Vault",
+        "notes": notes,
+        "missing": missing,
+        "mode": "live" if ready else "local",
+    }
 
 
 def email_status() -> dict[str, Any]:
-    ready = (
-        _has("EMAIL_USER")
-        and _has("EMAIL_PASS")
-        and bool((_env("BUYER_EMAILS") or "").strip())
-    )
-    notes = []
-    if not ready:
+    missing = _missing(["EMAIL_USER", "EMAIL_PASS", "BUYER_EMAILS"])
+    # BUYER_EMAILS may be present but empty after split — double-check
+    if _has("BUYER_EMAILS") and not (_env("BUYER_EMAILS") or "").strip():
+        if "BUYER_EMAILS" not in missing:
+            missing.append("BUYER_EMAILS")
+    ready = not missing
+    notes: list[str] = []
+    if missing:
+        notes.append(f"Missing: {', '.join(missing)}")
         notes.append("Need EMAIL_USER, EMAIL_PASS (Gmail App Password), BUYER_EMAILS")
-    notes.append("Use a deals@ mailbox so blasts don't hit spam.")
-    return {"ready": ready, "label": "Buyer Email Blast", "notes": notes}
+    else:
+        buyers = [e for e in _env("BUYER_EMAILS").replace(";", ",").split(",") if e.strip()]
+        notes.append(f"Configured for {len(buyers)} buyer recipient(s)")
+    notes.append("Use a deals@ mailbox + App Password so blasts don't hit spam.")
+    return {
+        "ready": ready,
+        "label": "Buyer Email Blast",
+        "notes": notes,
+        "missing": missing,
+        "mode": "live" if ready else "off",
+    }
 
 
 def rentcast_status() -> dict[str, Any]:
     from data_engine import has_rentcast_key
 
     ready = has_rentcast_key()
+    missing = [] if ready else ["RENTCAST_API_KEY"]
     notes = [
         "Powers live ARV/comps + Seller Factory + owner name skip-trace.",
         "Does NOT return cell phones.",
     ]
-    return {"ready": ready, "label": "RentCast Data", "notes": notes}
+    if not ready:
+        notes.insert(0, "Missing RENTCAST_API_KEY — app will use MOCK property/comps.")
+    else:
+        notes.insert(0, "Live RentCast ON — no silent mock when API returns data.")
+    return {
+        "ready": ready,
+        "label": "RentCast Data",
+        "notes": notes,
+        "missing": missing,
+        "mode": "live" if ready else "mock",
+    }
 
 
 def people_data_status() -> dict[str, Any]:
     from phone_enrich import people_data_configured
 
     ready = people_data_configured()
+    missing = [] if ready else ["PEOPLE_DATA_API_URL", "PEOPLE_DATA_API_KEY"]
     notes = [
         "Optional: PEOPLE_DATA_API_URL + PEOPLE_DATA_API_KEY for cell enrichment.",
         "Without it: paste phones manually / CSV import.",
     ]
-    return {"ready": ready, "label": "People-Data Phones", "notes": notes}
+    return {
+        "ready": ready,
+        "label": "People-Data Phones",
+        "notes": notes,
+        "missing": missing,
+        "mode": "live" if ready else "manual",
+        "optional": True,
+    }
 
 
 def full_stack_report() -> list[dict[str, Any]]:
@@ -222,6 +371,69 @@ def full_stack_report() -> list[dict[str, Any]]:
     ]
 
 
+def missing_keys_summary() -> list[str]:
+    """Flat list of missing required (non-optional) secret names."""
+    keys: list[str] = []
+    for row in full_stack_report():
+        if row.get("optional"):
+            continue
+        for k in row.get("missing") or []:
+            if k not in keys:
+                keys.append(k)
+    return keys
+
+
+CLOUD_SECRETS_TOML_TEMPLATE = '''# === DealShark Streamlit Cloud Secrets (PLACEHOLDERS ONLY) ===
+# App settings → Secrets → paste → Save → Reboot app
+# Do NOT commit real values. No trailing slash on APP_BASE_URL.
+
+RENTCAST_API_KEY = "paste_rentcast_key"
+
+TWILIO_ACCOUNT_SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+TWILIO_AUTH_TOKEN = "paste_twilio_auth_token"
+TWILIO_PHONE_NUMBER = "+1XXXXXXXXXX"
+TWILIO_AGENT_PHONE = "+1XXXXXXXXXX"
+NOTIFY_PHONE = "+1XXXXXXXXXX"
+# Optional War Room click-to-call webhook:
+# TWILIO_VOICE_WEBHOOK = "https://your-twilio-function.twil.io/conference"
+
+APP_BASE_URL = "https://realestateshark.streamlit.app"
+
+# PRODUCTION money: sk_live_... (or rk_live_...). sk_test_ = demo charges only.
+STRIPE_SECRET_KEY = "sk_live_xxxxxxxx"
+STRIPE_EMD_CENTS = "250000"
+
+EMAIL_USER = "you@gmail.com"
+EMAIL_PASS = "xxxx_gmail_app_password_xxxx"
+EMAIL_FROM = "deals@yourdomain.com"
+BUYER_EMAILS = "buyer1@example.com, buyer2@example.com"
+
+WIRE_BANK = "Your Title Company Escrow"
+WIRE_ACCOUNT = "xxxx"
+WIRE_ROUTING = "xxxx"
+TITLE_COMPANY_NAME = "ABC Title / Escrow"
+
+GOOGLE_SHEETS_URL = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+
+# Optional cell enrichment (not RentCast):
+# PEOPLE_DATA_API_URL = "https://api.vendor.com/lookup?name={name}&address={address}&api_key={api_key}"
+# PEOPLE_DATA_API_KEY = "paste_vendor_key"
+
+[connections.gsheets]
+spreadsheet = "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
+
+# Uncomment and paste full Google Cloud service-account JSON fields:
+# [gcp_service_account]
+# type = "service_account"
+# project_id = "your-project"
+# private_key_id = "..."
+# private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
+# client_email = "....iam.gserviceaccount.com"
+# client_id = "..."
+# token_uri = "https://oauth2.googleapis.com/token"
+'''
+
+
 def render_systems_check() -> None:
     import streamlit as st
 
@@ -231,23 +443,51 @@ def render_systems_check() -> None:
     for i, row in enumerate(report):
         with cols[i % 3]:
             if row["ready"]:
-                st.success(f"ON · {row['label']}")
+                mode = row.get("mode") or ""
+                suffix = f" ({mode})" if mode and mode not in ("live", "on") else ""
+                st.success(f"ON · {row['label']}{suffix}")
             else:
-                st.error(f"OFF · {row['label']}")
+                opt = " (optional)" if row.get("optional") else ""
+                st.error(f"OFF · {row['label']}{opt}")
+            missing = row.get("missing") or []
+            if missing:
+                st.caption("Missing keys: " + ", ".join(missing))
             for n in row.get("notes") or []:
                 st.caption(n)
+
+    # Stripe force-live warning
+    stripe = next((r for r in report if r["label"] == "Stripe EMD"), None)
+    if stripe and stripe.get("ready") and stripe.get("mode") == "test":
+        st.warning(
+            "Stripe is ON but in TEST mode — buyers will not pay real money. "
+            "Replace STRIPE_SECRET_KEY with sk_live_... (or rk_live_...), Save Secrets, Reboot."
+        )
+    if stripe and stripe.get("mode") == "live" and not stripe.get("production_ready"):
+        st.warning("Stripe live key detected but APP_BASE_URL is missing.")
+
+    all_missing = missing_keys_summary()
+    if all_missing:
+        st.error("Required secrets still missing (names only — values never shown):")
+        st.code("\n".join(all_missing), language="text")
 
     tw = next((r for r in report if r["label"] == "Twilio SMS"), None)
     if tw and not tw["ready"]:
         st.warning(
-            "Twilio is OFF. Paste this exact block into Streamlit Cloud → Settings → Secrets "
-            "(replace with your real values), then **Reboot** the app:"
+            "Twilio is OFF. Paste TOP-LEVEL names into Streamlit Cloud → Settings → Secrets, "
+            "then **Reboot** the app:"
         )
         st.code(
             'TWILIO_ACCOUNT_SID = "ACxxxxxxxx"\n'
             'TWILIO_AUTH_TOKEN = "your_auth_token"\n'
             'TWILIO_PHONE_NUMBER = "+18881234567"',
             language="toml",
+        )
+
+    with st.expander("Full Cloud Secrets TOML (placeholders only)", expanded=False):
+        st.code(CLOUD_SECRETS_TOML_TEMPLATE, language="toml")
+        st.caption(
+            "After paste: Save → Manage app → Reboot. "
+            "Twilio 10DLC required for bulk SMS. Prefer email blast until registered."
         )
 
     st.markdown(

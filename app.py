@@ -245,13 +245,16 @@ with status_tab:
     render_systems_check()
     st.markdown(
         """
-**Go-Live checklist**
-1. Stripe: use live key (`sk_live_...`) + `APP_BASE_URL` with no trailing slash
-2. Gmail: 2FA + App Password for `EMAIL_USER` / `EMAIL_PASS` + `BUYER_EMAILS`
-3. Prefer **email blast** until Twilio 10DLC is registered (trial SMS is nearly useless)
-4. Call Hillsborough title (Sunbelt / Bay Title) — confirm they handle assignments
-5. Paste their wire info into Secrets: `WIRE_BANK`, `WIRE_ROUTING`, `WIRE_ACCOUNT`, `TITLE_COMPANY_NAME`
-6. Optional phones: `PEOPLE_DATA_API_URL` + `PEOPLE_DATA_API_KEY` (RocketReach / Lusha / PropertyRadar style)
+**Go-Live checklist (tonight)**
+1. **Stripe:** `sk_live_...` (or `rk_live_...`) + `APP_BASE_URL` with **no trailing slash**
+2. **Gmail:** 2FA + App Password → `EMAIL_USER` / `EMAIL_PASS` + comma-separated `BUYER_EMAILS`
+3. **Twilio:** top-level `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (+E.164) → **Reboot** after paste
+4. Prefer **email blast** until Twilio **10DLC** is registered (trial SMS ≈ verified numbers only)
+5. **Sheets:** `[connections.gsheets]` + share Leads tab with service-account email
+6. **RentCast:** `RENTCAST_API_KEY` (owner name + comps — not cell phones)
+7. Call Hillsborough title — confirm assignments; paste `WIRE_*` / `TITLE_COMPANY_NAME`
+8. Optional phones: `PEOPLE_DATA_API_URL` + `PEOPLE_DATA_API_KEY`
+9. Cloud: Settings → Secrets → Save → **Manage app → Reboot**
         """
     )
 
@@ -307,6 +310,13 @@ with calc_tab:
                         f"{st.session_state.sqft:,.0f} sqft · "
                         f"source={st.session_state.data_source}"
                     )
+                    if st.session_state.data_source == "mock":
+                        st.warning("MOCK data — add RENTCAST_API_KEY for live ARV/comps.")
+                    elif not st.session_state.comps:
+                        st.warning(
+                            "Live RentCast returned no nearby sold comps. "
+                            "ARV may rely on last-sale estimate — verify manually."
+                        )
 
         if do_trace:
             if not address.strip():
@@ -314,19 +324,35 @@ with calc_tab:
             else:
                 hit = skip_trace(address.strip())
                 if hit:
-                    st.session_state.seller_name = hit.get("owner_name") or ""
-                    st.session_state.seller_phone = hit.get("phone") or ""
-                    st.session_state.seller_email = hit.get("email") or ""
                     src = hit.get("source") or "unknown"
-                    st.success(f"Located: **{st.session_state.seller_name}** · source=`{src}`")
-                    if hit.get("mailing_address"):
-                        st.caption(f"Mailing: {hit.get('mailing_address')}")
-                    if not hit.get("phone"):
-                        st.info(
-                            "Owner name pulled from RentCast. "
-                            "No cell on file — paste mobile manually for SMS "
-                            "(people-data phone vendors are separate from BatchData)."
+                    if src == "not_found" or hit.get("error"):
+                        st.warning(
+                            hit.get("error")
+                            or "Live skip-trace configured but no owner found for this address."
                         )
+                        st.caption(f"source=`{src}` — paste owner name / phone manually.")
+                    elif src == "mock":
+                        st.warning(
+                            "MOCK owner (no RENTCAST_API_KEY). Add key for live owner names."
+                        )
+                        st.session_state.seller_name = hit.get("owner_name") or ""
+                        st.session_state.seller_phone = hit.get("phone") or ""
+                        st.session_state.seller_email = hit.get("email") or ""
+                    else:
+                        st.session_state.seller_name = hit.get("owner_name") or ""
+                        st.session_state.seller_phone = hit.get("phone") or ""
+                        st.session_state.seller_email = hit.get("email") or ""
+                        st.success(
+                            f"Located: **{st.session_state.seller_name or '(name blank)'}** · source=`{src}`"
+                        )
+                        if hit.get("mailing_address"):
+                            st.caption(f"Mailing: {hit.get('mailing_address')}")
+                        if not hit.get("phone"):
+                            st.info(
+                                "Owner name pulled from RentCast. "
+                                "No cell on file — paste mobile manually for SMS "
+                                "(people-data vendors are separate)."
+                            )
                 else:
                     st.error("Skip trace returned nothing.")
 

@@ -7,14 +7,20 @@ from __future__ import annotations
 import os
 
 
+_STRIPE_PLACEHOLDERS = frozenset(
+    {"", "sk_test_...", "sk_live_...", "rk_test_...", "rk_live_...", "your_key_here"}
+)
+
+
 def stripe_configured() -> bool:
-    return bool((os.getenv("STRIPE_SECRET_KEY") or "").strip())
+    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    return bool(key) and key not in _STRIPE_PLACEHOLDERS
 
 
 def stripe_mode() -> str:
-    """Return 'live', 'test', or 'off'."""
+    """Return 'live', 'test', 'unknown', or 'off'."""
     key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
-    if not key:
+    if not key or key in _STRIPE_PLACEHOLDERS:
         return "off"
     if key.startswith("sk_live_") or key.startswith("rk_live_"):
         return "live"

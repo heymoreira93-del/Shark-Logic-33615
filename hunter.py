@@ -66,13 +66,28 @@ def skip_trace(address: str) -> dict[str, Any] | None:
             print(f"Skip trace API error: {exc}")
 
     if not hit:
-        hit = {
-            "owner_name": "John Doe (mock - add RENTCAST_API_KEY for live owner)",
-            "phone": "",
-            "email": "johndoe@example.com",
-            "mailing_address": address,
-            "source": "mock",
-        }
+        # Only invent a demo owner when NOTHING is configured.
+        # If RentCast / skip-trace keys exist, surface a miss — never fake an owner.
+        if has_provider() or (api_url and api_key):
+            hit = {
+                "owner_name": "",
+                "phone": "",
+                "email": "",
+                "mailing_address": address,
+                "source": "not_found",
+                "error": (
+                    "Live skip-trace configured but no owner returned for this address. "
+                    "Check spelling (include city/state/zip) or paste owner manually."
+                ),
+            }
+        else:
+            hit = {
+                "owner_name": "John Doe (mock - add RENTCAST_API_KEY for live owner)",
+                "phone": "",
+                "email": "johndoe@example.com",
+                "mailing_address": address,
+                "source": "mock",
+            }
 
     if not (hit.get("phone") or "").strip() and people_data_configured():
         enrich = enrich_phone(
