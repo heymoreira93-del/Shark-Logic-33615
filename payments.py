@@ -16,9 +16,9 @@ def stripe_mode() -> str:
     key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
     if not key:
         return "off"
-    if key.startswith("sk_live_"):
+    if key.startswith("sk_live_") or key.startswith("rk_live_"):
         return "live"
-    if key.startswith("sk_test_"):
+    if key.startswith("sk_test_") or key.startswith("rk_test_"):
         return "test"
     return "unknown"
 
