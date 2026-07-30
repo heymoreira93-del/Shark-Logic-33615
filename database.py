@@ -127,6 +127,17 @@ def get_lead(lead_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def update_lead_phone(lead_id: int, phone: str) -> bool:
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE leads SET seller_phone = ? WHERE id = ?",
+            ((phone or "").strip(), lead_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
 def update_lead_status(lead_id: int, status: str) -> bool:
     if status not in STATUSES:
         return False

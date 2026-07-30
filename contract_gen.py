@@ -1,7 +1,7 @@
 """
-Assignment contract PDF — assignor fee for wholesaling deals.
-Includes Disbursement Authorization + escrow wire instructions.
-Saves to contracts/ as a deal ledger.
+Assignment of Real Estate Purchase and Sale Agreement PDF.
+Black-ink boilerplate + closing-agent instructions + disbursement page.
+ASCII-only text for fpdf Helvetica compatibility.
 """
 
 from __future__ import annotations
@@ -42,6 +42,21 @@ def add_disbursement_page(
     """Title-company instruction page: pay Assignor fee from buyer proceeds."""
     info = wire_info or _wire_info()
     pdf.add_page()
+
+    pdf.set_text_color(180, 0, 0)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.multi_cell(
+        0,
+        7,
+        "ATTENTION CLOSING AGENT:\n"
+        "Per the terms of this Assignment, the Assignment Fee is to be treated as a "
+        "Contractual Obligation and paid directly to "
+        f"{your_name} at closing. Do not net this fee against the seller's proceeds. "
+        "This is a Buyer-paid assignment fee.",
+    )
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(6)
+
     pdf.set_font("Helvetica", "B", 16)
     pdf.cell(0, 10, "DISBURSEMENT AUTHORIZATION", align="C", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(8)
@@ -59,21 +74,19 @@ def add_disbursement_page(
         f"Account Name: {your_name}\n"
         f"Account Number: {info.get('account', '')}\n"
         f"Routing Number: {info.get('routing', '')}\n\n"
-        f"This page is an operational template. Confirm final wire instructions "
-        f"with your title company before funding."
+        f"Confirm final wire instructions with your title company before funding."
     )
     pdf.multi_cell(0, 6, body)
-    pdf.ln(10)
-    # Red wire callout (fpdf uses RGB 0-255)
-    pdf.set_text_color(180, 0, 0)
-    pdf.set_font("Helvetica", "B", 11)
+    pdf.ln(8)
+    pdf.set_font("Helvetica", "I", 9)
     pdf.multi_cell(
         0,
-        6,
-        "IMPORTANT: Do not release Assignment Fee to any party other than the "
-        f"named Assignor ({your_name}) without written amendment.",
+        5,
+        "FOOTER DISCLAIMER: This is an Assignment of Equitable Interest / contractual "
+        "rights under a purchase agreement - not a brokerage of real property. "
+        "Operational template only. Have a Florida-licensed attorney and title company "
+        "review before relying on it for a live closing.",
     )
-    pdf.set_text_color(0, 0, 0)
 
 
 def generate_assignment_pdf(
@@ -86,10 +99,13 @@ def generate_assignment_pdf(
     output_dir: Path | None = None,
     include_disbursement: bool = True,
     flood_insurance_required: bool = False,
+    emd_amount: float = 2500.0,
+    closing_date: str = "",
+    emd_paid_via_stripe: bool = False,
+    emd_paid_at: str = "",
 ) -> Path:
     """
-    Build Assignment of Real Estate Purchase Contract PDF.
-    Returns path under contracts/.
+    Build Assignment of Real Estate Purchase and Sale Agreement PDF.
     """
     out_dir = output_dir or CONTRACTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -98,84 +114,124 @@ def generate_assignment_pdf(
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(
-        0,
-        10,
-        "ASSIGNMENT OF REAL ESTATE PURCHASE CONTRACT",
-        align="C",
-        new_x="LMARGIN",
-        new_y="NEXT",
+    date_str = datetime.date.today().strftime("%B %d, %Y")
+    assignee = buyer_name.strip() or "TBD Cash Buyer"
+    close_line = closing_date.strip() or "(closing date per Original Agreement)"
+    price_bit = (
+        f"Underlying Original Agreement purchase price: ${purchase_price:,.2f}.\n"
+        if purchase_price is not None
+        else ""
     )
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.cell(0, 6, "DealShark Acquisitions - Shark Logic Terms", align="C", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(8)
+
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.multi_cell(
+        0,
+        7,
+        "ASSIGNMENT OF REAL ESTATE PURCHASE AND SALE AGREEMENT",
+        align="C",
+    )
+    pdf.ln(4)
 
     if flood_insurance_required:
         pdf.set_text_color(180, 0, 0)
-        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_font("Helvetica", "B", 11)
         pdf.multi_cell(
             0,
             6,
             "WARNING: FLOOD INSURANCE REQUIRED - High Risk Flood Zone (AE). "
-            "Offer / MAO includes a $15,000 flood-risk buffer. Assignee must verify premiums.",
+            "MAO / offer includes a $15,000 flood-risk buffer. "
+            "Assignee must verify NFIP/private premiums.",
         )
         pdf.set_text_color(0, 0, 0)
-        pdf.ln(4)
+        pdf.ln(3)
 
-    date_str = datetime.date.today().strftime("%B %d, %Y")
-    pdf.set_font("Helvetica", size=11)
-
-    price_line = ""
-    if purchase_price is not None:
-        price_line = f"Underlying Purchase Price (MAO / Contract Price): ${purchase_price:,.2f}\n\n"
-
-    body = (
-        f"This Assignment is made on {date_str}.\n\n"
-        f"Assignor ({assignor_name}) hereby assigns all rights, title, and interest "
-        f"in and to the real estate purchase contract for the property located at:\n\n"
-        f"{address}\n\n"
-        f"To Assignee (The Cash Buyer): {buyer_name or 'TBD'}\n\n"
-        f"{price_line}"
-        f"The Assignee agrees to pay an Assignment Fee of: ${assignment_fee:,.2f}\n"
-        f"This fee is to be paid in full at the time of closing and shall appear on "
-        f"the settlement statement (HUD-1 / Closing Disclosure).\n\n"
-        f"Shark Logic terms: Property is assigned AS-IS. Assignor makes no warranty "
-        f"regarding flood zone, insurance premiums, or condition. Assignee acknowledges "
-        f"independent due diligence, including flood and insurance review for Tampa Bay "
-        f"zips including 33615 (Town 'N' Country / Rocky Point).\n\n"
-        f"This document is a simplified operational template. Consult a Florida-licensed "
-        f"attorney and title company before relying on it for a live closing."
+    pdf.set_font("Helvetica", size=10)
+    boilerplate = (
+        f"This Assignment of Real Estate Purchase and Sale Agreement "
+        f'("Assignment") is made this {date_str} by and between '
+        f'{assignor_name} ("Assignor") and {assignee} ("Assignee").\n\n'
+        f"RECITALS\n"
+        f"A. Assignor entered into a certain Real Estate Purchase and Sale Agreement "
+        f'("Original Agreement") for the property located at {address} ("Property").\n'
+        f"B. Assignor is not the owner of record but holds equitable interest via a "
+        f"fully executed purchase agreement. Assignor desires to assign all its rights "
+        f"and interests in the Original Agreement to Assignee, and Assignee desires to "
+        f"assume such rights and interests.\n"
+        f"{price_bit}\n"
+        f"AGREEMENT\n"
+        f"1. ASSIGNMENT: For the sum of ${assignment_fee:,.2f}, Assignor hereby assigns "
+        f"all rights, title, and interest in the Original Agreement to Assignee.\n"
+        f"2. EARNEST MONEY: Assignee has paid or shall pay a non-refundable Earnest Money "
+        f"Deposit (EMD) of ${emd_amount:,.2f} via electronic transfer. This deposit shall "
+        f"be credited to the total Assignment Fee at closing.\n"
+        f'3. "AS-IS" CONDITION: Assignee acknowledges they are purchasing the contract '
+        f'interest in "AS-IS" condition and has performed all necessary due diligence, '
+        f"including flood and insurance review for Tampa Bay (including 33615).\n"
+        f"4. DISBURSEMENT: Assignee hereby instructs the Title Company/Closing Agent to "
+        f"disburse the balance of the Assignment Fee directly to Assignor from the "
+        f"Buyer's side of the Settlement Statement at the time of closing.\n"
+        f"5. INDEMNITY: Assignee shall indemnify and hold Assignor harmless from any and "
+        f"all claims or liabilities arising from the Original Agreement after the date "
+        f"of this Assignment.\n"
+        f"6. VANISH / DEFAULT: If Assignee fails to close by {close_line}, the EMD is "
+        f"forfeited to Assignor and this Assignment is null and void, restoring "
+        f"Assignor's rights under the Original Agreement.\n"
+        f"7. NATURE OF INTEREST: This instrument assigns equitable / contractual rights "
+        f"under the Original Agreement. It is not a brokerage of real property and does "
+        f"not convey record title until closing of the Original Agreement.\n"
     )
-    pdf.multi_cell(0, 6, body)
-    pdf.ln(16)
+    pdf.multi_cell(0, 5, boilerplate)
+    pdf.ln(4)
 
-    pdf.set_font("Helvetica", size=11)
+    if emd_paid_via_stripe:
+        stamp = emd_paid_at or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(0, 120, 60)
+        pdf.multi_cell(
+            0,
+            5,
+            f"EMD PAID VIA STRIPE - Timestamp: {stamp} - "
+            f"electronic payment confirmation evidences intent to be bound.",
+        )
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(3)
+
+    pdf.set_font("Helvetica", size=10)
     pdf.cell(95, 8, "_______________________________", new_x="RIGHT")
     pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(95, 6, "Assignor Signature", new_x="RIGHT")
     pdf.cell(0, 6, "Assignee Signature", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(8)
+    pdf.ln(6)
     pdf.cell(95, 8, "_______________________________", new_x="RIGHT")
     pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(95, 6, "Date", new_x="RIGHT")
-    pdf.cell(0, 6, "Date", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, "Date / EMD Stripe confirmation", new_x="LMARGIN", new_y="NEXT")
 
-    # Escrow wire callout on page 1 (red)
     wire = _wire_info()
-    pdf.ln(12)
+    pdf.ln(10)
     pdf.set_text_color(180, 0, 0)
     pdf.set_font("Helvetica", "B", 10)
     pdf.multi_cell(
         0,
         5,
         (
-            f"TITLE / ESCROW WIRE (for Assignment Fee at closing):\n"
+            f"TITLE / ESCROW WIRE (Assignment Fee at closing):\n"
             f"Bank: {wire['bank']} | Routing: {wire['routing']} | "
             f"Acct: {wire['account']} | Pay to: {assignor_name}"
         ),
     )
     pdf.set_text_color(0, 0, 0)
+
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.multi_cell(
+        0,
+        4,
+        "FOOTER: Assignment of Equitable Interest template. Not legal advice. "
+        "Consult a Florida-licensed attorney and a Hillsborough title company "
+        "(e.g. Sunbelt Title / Bay Title) that handles assignments or double closings "
+        "before using on a live file.",
+    )
 
     if include_disbursement:
         add_disbursement_page(pdf, assignment_fee, assignor_name, address, wire)
