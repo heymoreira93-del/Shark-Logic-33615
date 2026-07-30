@@ -44,7 +44,7 @@ from rehab import (
     tampa_hazard_check,
 )
 from seller_factory import render_seller_factory
-from sheets_vault import log_to_sheets, read_leads, sheets_configured
+from sheets_vault import log_to_sheets, read_leads, sheets_configured, sheets_missing_keys
 from systems_check import email_status, render_systems_check, stripe_status
 from tampa_config import DEFAULT_CLOSING_COST_PCT, MANUAL_FLOOD_MAO_HIT
 
@@ -493,8 +493,13 @@ with calc_tab:
         if not comps and address.strip():
             comps = get_tampa_comps(address.strip(), zip_code=zip_guess)
             st.session_state.comps = comps
+            err = getattr(get_tampa_comps, "last_error", "") or ""
+            if err and not comps:
+                st.warning(f"Comps unavailable: {err}")
 
         with st.expander(f"Nearby Comps ({len(comps)})"):
+            if not comps:
+                st.caption("No nearby sold comps found for this address.")
             for c in comps:
                 st.write(
                     f"{c.get('status', 'Sold')} · {c.get('address')} · "
@@ -714,11 +719,21 @@ with calc_tab:
     emd = emd_amount_dollars()
     gate_on = stripe_configured()
     mode = stripe_mode()
+    sheets_on = sheets_configured()
+    email_on = email_configured()
     st.caption(
-        f"Sheets: {'ON' if sheets_configured() else 'local CRM'} · "
+        f"Sheets: {'ON' if sheets_on else 'OFF (local CRM only)'} · "
         f"Stripe EMD: {'ON ($' + f'{emd:,.0f}, ' + mode + ')' if gate_on else 'OFF'} · "
-        f"Email blast: {'ON' if email_configured() else 'OFF'}"
+        f"Email blast: {'ON' if email_on else 'OFF'}"
     )
+    if not sheets_on:
+        miss = sheets_missing_keys()
+        st.caption(
+            "Sheets Vault blocked — set: "
+            + (", ".join(miss) if miss else "GOOGLE_SHEETS_URL + [gcp_service_account]")
+        )
+    if not email_on:
+        st.caption("Buyer blast blocked — set: EMAIL_USER, EMAIL_PASS, BUYER_EMAILS")
     if mode == "live":
         st.caption(
             "Stripe is on LIVE keys. If checkout fails with 'cannot make live charges', "
@@ -752,8 +767,28 @@ with calc_tab:
     with closer_c:
         bypass = st.button("Unlock PDF (dev / wire)", use_container_width=True)
 
+    def _gen_assignment_pdf(*, emd_paid_via_stripe: bool) -> str:
+        path = generate_assignment_pdf(
+            address.strip(),
+            cash_buyer.strip() or "TBD",
+            float(assignment_fee),
+            assignor_name=buyer_name.strip() or "DealShark Acquisitions",
+            purchase_price=float(offer_price),
+            flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
+            emd_amount=float(emd),
+            closing_date=closing_date,
+            emd_paid_via_stripe=emd_paid_via_stripe,
+        )
+        st.session_state.assign_pdf_path = str(path)
+        return str(path)
+
     if bypass:
         st.session_state.paid = True
+        if not address.strip():
+            st.warning("Unlocked paywall — enter an address, then Generate PDF / VERIFY.")
+        else:
+            _gen_assignment_pdf(emd_paid_via_stripe=bool(gate_on))
+            st.success("PDF unlocked (wire / dev). Download below.")
 
     if blast:
         if not address.strip():
@@ -765,17 +800,18 @@ with calc_tab:
             if not email_ok and not stripe_ok:
                 st.error(
                     "VERIFY FAILED: Email and Stripe secrets are both OFF. "
-                    "Paste EMAIL_* and/or STRIPE_SECRET_KEY + APP_BASE_URL in Cloud Secrets."
+                    "Set EMAIL_USER / EMAIL_PASS / BUYER_EMAILS and/or "
+                    "STRIPE_SECRET_KEY + APP_BASE_URL."
                 )
             else:
                 if not email_ok:
-                    st.warning(
-                        "Email OFF — blasting skipped. Fix EMAIL_USER / EMAIL_PASS / BUYER_EMAILS. "
-                        "(Preferred over Twilio trial until 10DLC.)"
+                    st.error(
+                        "BLAST BLOCKED — Email OFF. Set EMAIL_USER, EMAIL_PASS, BUYER_EMAILS "
+                        "in `.env` (Gmail App Password), then restart Streamlit."
                     )
                 if not stripe_ok:
                     st.warning(
-                        "Stripe OFF — no EMD checkout link. Wire / unlock still available."
+                        "Stripe OFF — no EMD checkout link. Wire / Unlock PDF still available."
                     )
 
                 checkout_url = ""
@@ -787,24 +823,16 @@ with calc_tab:
                     st.session_state.checkout_url = checkout_url
                     if checkout_url:
                         st.info(f"EMD lock link: {checkout_url}")
+                        st.success("VERIFY OK — Stripe checkout session live.")
                     else:
                         err = getattr(create_checkout_session, "last_error", "") or "check STRIPE_SECRET_KEY"
                         st.error(f"Stripe session failed: {err}")
                 else:
                     st.session_state.paid = True
 
-                path = generate_assignment_pdf(
-                    address.strip(),
-                    cash_buyer.strip() or "TBD",
-                    float(assignment_fee),
-                    assignor_name=buyer_name.strip() or "DealShark Acquisitions",
-                    purchase_price=float(offer_price),
-                    flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
-                    emd_amount=float(emd),
-                    closing_date=closing_date,
-                    emd_paid_via_stripe=bool(st.session_state.paid and gate_on),
+                _gen_assignment_pdf(
+                    emd_paid_via_stripe=bool(st.session_state.paid and gate_on)
                 )
-                st.session_state.assign_pdf_path = str(path)
                 st.success("Assignment PDF generated with equitable-interest boilerplate.")
 
                 pay_link = checkout_url or "(wire / unlock after EMD)"
@@ -818,31 +846,81 @@ with calc_tab:
                         flood_risk=bool(high_risk_flood or flood_buffer > 0),
                     )
                     if ok:
-                        st.success(f"VERIFY OK — blasted to buyers. {msg}")
+                        st.success(f"BLAST OK — {msg}")
                     else:
-                        st.error(msg)
+                        st.error(f"BLAST FAILED: {msg}")
 
-                ok_s, msg_s = log_to_sheets(
-                    {
-                        "name": seller_name.strip() or "Seller",
-                        "address": address.strip(),
-                        "zip_code": zip_guess or extract_zip(address) or "",
-                        "status": "Offered",
-                        "arv": float(arv),
-                        "mao": float(offer_price),
-                        "fee": float(assignment_fee),
-                        "buyer_name": cash_buyer.strip(),
-                        "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
-                    }
-                )
-                if ok_s:
-                    st.success(msg_s)
+                if sheets_on:
+                    ok_s, msg_s = log_to_sheets(
+                        {
+                            "name": seller_name.strip() or "Seller",
+                            "address": address.strip(),
+                            "zip_code": zip_guess or extract_zip(address) or "",
+                            "status": "Offered",
+                            "arv": float(arv),
+                            "mao": float(offer_price),
+                            "fee": float(assignment_fee),
+                            "buyer_name": cash_buyer.strip(),
+                            "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
+                        }
+                    )
+                    if ok_s:
+                        st.success(msg_s)
+                    else:
+                        st.error(msg_s)
                 else:
-                    st.error(msg_s)
+                    # Still mirror locally, but do not claim Google Vault
+                    _ok_crm, msg_crm = log_to_sheets(
+                        {
+                            "name": seller_name.strip() or "Seller",
+                            "address": address.strip(),
+                            "zip_code": zip_guess or extract_zip(address) or "",
+                            "status": "Offered",
+                            "arv": float(arv),
+                            "mao": float(offer_price),
+                            "fee": float(assignment_fee),
+                            "buyer_name": cash_buyer.strip(),
+                            "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
+                        }
+                    )
+                    miss = sheets_missing_keys()
+                    st.warning(
+                        f"{msg_crm if _ok_crm else 'CRM save failed.'} "
+                        f"Google Vault still OFF — set: {', '.join(miss) if miss else 'GOOGLE_SHEETS_URL'}"
+                    )
 
     if log_deal:
         if not address.strip():
             st.error("Enter a property address first.")
+        elif not sheets_configured():
+            miss = sheets_missing_keys()
+            st.error(
+                "Log Deal blocked — Google Sheets Vault is OFF. "
+                "Set "
+                + (
+                    ", ".join(miss)
+                    if miss
+                    else "GOOGLE_SHEETS_URL + [connections.gsheets] + [gcp_service_account]"
+                )
+                + " in `.streamlit/secrets.toml` (share the sheet with the service-account email), "
+                "then Ctrl+C and `streamlit run app.py`."
+            )
+            # Soft local mirror so the deal is not lost
+            _ok, msg = log_to_sheets(
+                {
+                    "name": seller_name.strip() or "Seller",
+                    "address": address.strip(),
+                    "zip_code": zip_guess or extract_zip(address) or "",
+                    "status": "Offered",
+                    "arv": float(arv),
+                    "mao": float(offer_price),
+                    "fee": float(assignment_fee),
+                    "buyer_name": cash_buyer.strip(),
+                    "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
+                }
+            )
+            if _ok:
+                st.info(f"Local CRM fallback: {msg}")
         else:
             _ok, msg = log_to_sheets(
                 {

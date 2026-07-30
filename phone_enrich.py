@@ -31,16 +31,40 @@ def _ensure_secrets() -> None:
         pass
 
 
-def people_data_configured() -> bool:
+def _people_env(name: str) -> str:
+    """Resolve people-data URL/key including SKIP_TRACE_* aliases."""
     _ensure_secrets()
-    url = (os.getenv("PEOPLE_DATA_API_URL") or "").strip()
-    key = (os.getenv("PEOPLE_DATA_API_KEY") or "").strip()
-    if not url or not key:
-        return False
-    # Empty-string placeholders from secrets.toml.example
-    if key in {"paste_vendor_key", "your_key_here"}:
-        return False
-    return True
+    aliases = {
+        "PEOPLE_DATA_API_URL": (
+            "PEOPLE_DATA_API_URL",
+            "SKIP_TRACE_API_URL",
+            "BATCHDATA_API_URL",
+        ),
+        "PEOPLE_DATA_API_KEY": (
+            "PEOPLE_DATA_API_KEY",
+            "SKIP_TRACE_API_KEY",
+            "BATCHDATA_API_KEY",
+        ),
+    }
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+    except Exception:
+        def is_placeholder_secret(val: str | None) -> bool:  # type: ignore[misc]
+            return not (val or "").strip()
+
+    for alt in aliases.get(name, (name,)):
+        val = (os.getenv(alt) or "").strip()
+        if val and not is_placeholder_secret(val):
+            if alt != name:
+                os.environ[name] = val
+            return val
+    return ""
+
+
+def people_data_configured() -> bool:
+    url = _people_env("PEOPLE_DATA_API_URL")
+    key = _people_env("PEOPLE_DATA_API_KEY")
+    return bool(url and key)
 
 
 def _first_phone(data: dict[str, Any]) -> str:
@@ -91,8 +115,8 @@ def enrich_phone(
             ),
         }
 
-    api_url = (os.getenv("PEOPLE_DATA_API_URL") or "").strip()
-    api_key = (os.getenv("PEOPLE_DATA_API_KEY") or "").strip()
+    api_url = _people_env("PEOPLE_DATA_API_URL")
+    api_key = _people_env("PEOPLE_DATA_API_KEY")
     name_q = quote(owner_name or "")
     addr_q = quote(mailing_address or address or "")
 

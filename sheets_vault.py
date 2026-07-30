@@ -39,8 +39,15 @@ def sheets_configured() -> bool:
     _ensure_secrets()
     url = (os.getenv("GOOGLE_SHEETS_URL") or "").strip()
     # Reject template URL so Go-Live does not show Sheets ON with placeholders
-    if "YOUR_SHEET_ID" in url:
+    if "YOUR_SHEET_ID" in url or "REAL_ID" in url:
         url = ""
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(url):
+            url = ""
+    except Exception:
+        pass
     try:
         import streamlit as st
 
@@ -51,7 +58,11 @@ def sheets_configured() -> bool:
                     g = secrets["connections"]["gsheets"]
                     sheet = g.get("spreadsheet") if hasattr(g, "get") else g["spreadsheet"]
                     sheet_s = str(sheet or "").strip()
-                    if sheet_s and "YOUR_SHEET_ID" not in sheet_s:
+                    if (
+                        sheet_s
+                        and "YOUR_SHEET_ID" not in sheet_s
+                        and "REAL_ID" not in sheet_s
+                    ):
                         return True
                 except Exception:
                     pass
@@ -59,13 +70,48 @@ def sheets_configured() -> bool:
                 su = secrets.get("GOOGLE_SHEETS_URL") if hasattr(secrets, "get") else None
             except Exception:
                 su = None
-            if su and "YOUR_SHEET_ID" not in str(su):
-                return True
+            if su and "YOUR_SHEET_ID" not in str(su) and "REAL_ID" not in str(su):
+                su_s = str(su).strip()
+                if su_s:
+                    return True
             if "gcp_service_account" in secrets:
                 return bool(url or (su and "YOUR_SHEET_ID" not in str(su)))
     except Exception:
         pass
     return bool(url and os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"))
+
+
+def sheets_missing_keys() -> list[str]:
+    """Human-readable missing config names for Go-Live / Log Deal."""
+    if sheets_configured():
+        return []
+    missing: list[str] = []
+    url = (os.getenv("GOOGLE_SHEETS_URL") or "").strip()
+    bad_url = (not url) or ("YOUR_SHEET_ID" in url) or ("REAL_ID" in url)
+    has_conn = False
+    has_sa = False
+    try:
+        import streamlit as st
+
+        secrets = getattr(st, "secrets", None)
+        if secrets is not None:
+            if "connections" in secrets and "gsheets" in secrets["connections"]:
+                try:
+                    g = secrets["connections"]["gsheets"]
+                    sheet = g.get("spreadsheet") if hasattr(g, "get") else g["spreadsheet"]
+                    sheet_s = str(sheet or "").strip()
+                    has_conn = bool(sheet_s) and "YOUR_SHEET_ID" not in sheet_s
+                except Exception:
+                    has_conn = False
+            has_sa = "gcp_service_account" in secrets
+    except Exception:
+        pass
+    if bad_url and not has_conn:
+        missing.append("GOOGLE_SHEETS_URL")
+        missing.append("[connections.gsheets].spreadsheet")
+    if not has_sa and not os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE"):
+        missing.append("[gcp_service_account]")
+    return missing
 
 
 def _empty_df() -> pd.DataFrame:

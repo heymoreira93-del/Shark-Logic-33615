@@ -36,12 +36,28 @@ def _ensure_secrets() -> None:
         pass
 
 
+def _is_bad(val: str | None) -> bool:
+    raw = (val or "").strip()
+    if not raw or raw in _PLACEHOLDERS:
+        return True
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(raw):
+            return True
+    except Exception:
+        pass
+    if "example.com" in raw and "@" in raw:
+        return True
+    return False
+
+
 def _env(key: str) -> str:
     """Resolve EMAIL_* from os.environ, aliases, then st.secrets (incl. [email])."""
     _ensure_secrets()
     for alt in _EMAIL_ALIASES.get(key, (key,)):
         val = (os.getenv(alt) or "").strip()
-        if val:
+        if val and not _is_bad(val):
             if alt != key:
                 os.environ[key] = val
             return val
@@ -58,6 +74,8 @@ def _env(key: str) -> str:
                 continue
             if raw is not None and str(raw).strip():
                 cleaned = str(raw).strip().strip('"').strip("'")
+                if _is_bad(cleaned):
+                    continue
                 os.environ[key] = cleaned
                 return cleaned
         try:
@@ -77,6 +95,8 @@ def _env(key: str) -> str:
                 continue
             if raw is not None and str(raw).strip():
                 cleaned = str(raw).strip().strip('"').strip("'")
+                if _is_bad(cleaned):
+                    continue
                 os.environ[key] = cleaned
                 return cleaned
     except Exception:
@@ -94,13 +114,13 @@ def _buyer_list() -> list[str]:
 def email_configured() -> bool:
     user = _env("EMAIL_USER")
     password = _env("EMAIL_PASS")
-    if user in _PLACEHOLDERS or password in _PLACEHOLDERS:
+    if _is_bad(user) or _is_bad(password):
         return False
     buyers = _buyer_list()
     if not buyers:
         return False
     # Reject leftover example buyer list
-    if all(b in _PLACEHOLDERS or "example.com" in b for b in buyers):
+    if all(_is_bad(b) or "example.com" in b for b in buyers):
         return False
     return bool(user and password and buyers)
 
@@ -124,8 +144,8 @@ def alert_buyers(
 
     if not buyers:
         return False, "No BUYER_EMAILS in secrets/.env"
-    if not user or not password:
-        return False, "Missing EMAIL_USER / EMAIL_PASS"
+    if not user or not password or _is_bad(user) or _is_bad(password):
+        return False, "Missing or placeholder EMAIL_USER / EMAIL_PASS"
 
     flood_line = ""
     if flood_risk:

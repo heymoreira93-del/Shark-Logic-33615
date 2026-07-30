@@ -29,6 +29,17 @@ _SECRET_ALIASES: dict[str, tuple[str, ...]] = {
     "EMAIL_USER": ("EMAIL_USER", "GMAIL_USER", "SMTP_USER"),
     "EMAIL_PASS": ("EMAIL_PASS", "EMAIL_PASSWORD", "GMAIL_APP_PASSWORD", "SMTP_PASS"),
     "BUYER_EMAILS": ("BUYER_EMAILS", "BUYER_EMAIL", "CASH_BUYER_EMAILS"),
+    "PEOPLE_DATA_API_URL": (
+        "PEOPLE_DATA_API_URL",
+        "SKIP_TRACE_API_URL",
+        "BATCHDATA_API_URL",
+    ),
+    "PEOPLE_DATA_API_KEY": (
+        "PEOPLE_DATA_API_KEY",
+        "SKIP_TRACE_API_KEY",
+        "BATCHDATA_API_KEY",
+    ),
+    "GOOGLE_SHEETS_URL": ("GOOGLE_SHEETS_URL", "SHEETS_URL", "GSHEETS_URL"),
 }
 
 _PLACEHOLDERS = frozenset(
@@ -419,6 +430,7 @@ def people_data_status() -> dict[str, Any]:
     missing = [] if ready else ["PEOPLE_DATA_API_URL", "PEOPLE_DATA_API_KEY"]
     notes = [
         "Optional: PEOPLE_DATA_API_URL + PEOPLE_DATA_API_KEY for cell enrichment.",
+        "Aliases: SKIP_TRACE_API_URL / SKIP_TRACE_API_KEY also accepted.",
         "Without it: paste phones manually / CSV import.",
     ]
     return {
