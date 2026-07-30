@@ -1,5 +1,7 @@
 """
-Tampa Data Engine — RentCast live property + comps (with mock fallback).
+Tampa Data Engine — RentCast live property + comps.
+
+No mock property/comps when the key is missing: callers get None / [] / error.
 """
 
 from __future__ import annotations
@@ -78,7 +80,7 @@ def get_property_data(address: str) -> dict[str, Any] | None:
         return None
 
     if not has_rentcast_key():
-        return _mock_property(address)
+        return None
 
     try:
         url = f"{RENTCAST_BASE}/properties?address={quote(address)}"
@@ -119,14 +121,18 @@ def get_property_data(address: str) -> dict[str, Any] | None:
 
 def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0) -> list[dict[str, Any]]:
     """
-    Recent sold comps within radius (default 2 miles). Falls back to mock.
+    Recent sold comps within radius (default 2 miles).
     Uses RentCast /properties + saleDateRange (true solds), not active listings.
+    Without RENTCAST_API_KEY: empty list + last_error (never invents solds).
     """
     address = (address or "").strip()
     zip_code = zip_code or extract_zip(address)
     get_tampa_comps.last_error = ""  # type: ignore[attr-defined]
     if not has_rentcast_key():
-        return _mock_comps(address)
+        get_tampa_comps.last_error = (  # type: ignore[attr-defined]
+            "RENTCAST_API_KEY not configured — live comps OFF."
+        )
+        return []
 
     try:
         # RentCast: radius requires address OR lat/lng — zip+radius alone returns 400.
@@ -214,6 +220,14 @@ def get_tampa_data(address: str) -> dict[str, Any]:
     if not address:
         return {"error": "Enter an address."}
 
+    if not has_rentcast_key():
+        return {
+            "error": "RentCast OFF — set RENTCAST_API_KEY for live property/comps. No mock data.",
+            "source": "off",
+            "comps": [],
+            "comps_live": False,
+        }
+
     prop = get_property_data(address)
     if not prop:
         return {"error": "Property not found. Double-check the address (include city/state/zip)."}
@@ -223,13 +237,12 @@ def get_tampa_data(address: str) -> dict[str, Any]:
     comps = get_tampa_comps(address, zip_code=zip_code)
     arv, avg_pps = estimate_arv_from_comps(sqft, comps)
 
-    # If comps thin, fall back to last sale * 1.15 as rough ARV placeholder
+    # If comps thin, fall back to last sale * 1.15 as rough ARV estimate (live data only)
     if arv <= 0 and prop.get("lastSalePrice"):
         arv = float(prop["lastSalePrice"]) * 1.15
         avg_pps = (arv / sqft) if sqft else 0
 
-    live = has_rentcast_key()
-    source = prop.get("source", "rentcast" if live else "mock")
+    source = prop.get("source", "rentcast")
     return {
         "address": address,
         "yearBuilt": prop.get("yearBuilt"),
@@ -240,45 +253,8 @@ def get_tampa_data(address: str) -> dict[str, Any]:
         "arv": round(arv, 2),
         "avg_sqft_price": round(avg_pps, 2),
         "comps": comps,
-        "comps_live": live,
-        "comps_empty": live and not comps,
+        "comps_live": True,
+        "comps_empty": not comps,
         "flood_risk": zip_code in FLOOD_ZIPS,
         "source": source,
     }
-
-
-def _mock_property(address: str) -> dict[str, Any]:
-    zip_code = extract_zip(address, "33602")
-    return {
-        "address": address,
-        "propertyType": "Single Family",
-        "squareFootage": 1500.0,
-        "yearBuilt": 1978,
-        "lastSalePrice": 265000.0,
-        "zipCode": zip_code,
-        "bedrooms": 3,
-        "bathrooms": 2,
-        "source": "mock",
-    }
-
-
-def _mock_comps(address: str) -> list[dict[str, Any]]:
-    street = address.split(",")[0].strip() or "Subject"
-    base = 280000.0
-    out = []
-    for i, mult in enumerate((0.98, 1.02, 0.95)):
-        sqft = 1200 + i * 150
-        price = round(base * mult, 2)
-        out.append(
-            {
-                "address": f"{street} Comp {chr(65 + i)}",
-                "sold_price": price,
-                "status": "Sold",
-                "distance": f"{0.2 + i * 0.2:.1f} mi",
-                "beds": 3,
-                "baths": 2,
-                "sqft": sqft,
-                "price_per_sqft": price / sqft,
-            }
-        )
-    return out

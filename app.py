@@ -50,7 +50,7 @@ from tampa_config import DEFAULT_CLOSING_COST_PCT, MANUAL_FLOOD_MAO_HIT
 
 # Alias: High Risk Flood Zone AE hit ($15k) — same as MANUAL_FLOOD_MAO_HIT
 HIGH_RISK_FLOOD_HIT = MANUAL_FLOOD_MAO_HIT
-from tampa_leads import mock_tampa_offmarket_leads, prepare_recent_filings_parse
+from tampa_leads import prepare_recent_filings_parse
 from war_room import render_war_room
 
 # Bind CRM helpers after full module load (avoids Streamlit stale-import crashes)
@@ -222,7 +222,7 @@ if high_risk_flood:
 if has_rentcast_key():
     st.sidebar.success("RentCast API key detected — live data ON.")
 else:
-    st.sidebar.warning("No RentCast key — mock data. Add RENTCAST_API_KEY to `.env`.")
+    st.sidebar.error("RentCast OFF — no live property/comps. Add RENTCAST_API_KEY to `.env`.")
 
 st.sidebar.markdown("---")
 st.sidebar.title("33615 Pipeline")
@@ -356,9 +356,7 @@ with calc_tab:
                         f"{st.session_state.sqft:,.0f} sqft · "
                         f"source={st.session_state.data_source}"
                     )
-                    if st.session_state.data_source == "mock":
-                        st.warning("MOCK data — add RENTCAST_API_KEY for live ARV/comps.")
-                    elif not st.session_state.comps:
+                    if not st.session_state.comps:
                         st.warning(
                             "Live RentCast returned no nearby sold comps. "
                             "ARV may rely on last-sale estimate — verify manually."
@@ -371,19 +369,12 @@ with calc_tab:
                 hit = skip_trace(address.strip())
                 if hit:
                     src = hit.get("source") or "unknown"
-                    if src == "not_found" or hit.get("error"):
+                    if src in ("not_found", "not_configured") or hit.get("error"):
                         st.warning(
                             hit.get("error")
-                            or "Live skip-trace configured but no owner found for this address."
+                            or "Skip-trace returned no owner for this address."
                         )
                         st.caption(f"source=`{src}` — paste owner name / phone manually.")
-                    elif src == "mock":
-                        st.warning(
-                            "MOCK owner (no RENTCAST_API_KEY). Add key for live owner names."
-                        )
-                        st.session_state.seller_name = hit.get("owner_name") or ""
-                        st.session_state.seller_phone = hit.get("phone") or ""
-                        st.session_state.seller_email = hit.get("email") or ""
                     else:
                         st.session_state.seller_name = hit.get("owner_name") or ""
                         st.session_state.seller_phone = hit.get("phone") or ""
@@ -905,7 +896,7 @@ with calc_tab:
                 + " in `.streamlit/secrets.toml` (share the sheet with the service-account email), "
                 "then Ctrl+C and `streamlit run app.py`."
             )
-            # Soft local mirror so the deal is not lost
+            # Soft local mirror so the deal is not lost — never green-success as Vault
             _ok, msg = log_to_sheets(
                 {
                     "name": seller_name.strip() or "Seller",
@@ -919,8 +910,7 @@ with calc_tab:
                     "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
                 }
             )
-            if _ok:
-                st.info(f"Local CRM fallback: {msg}")
+            st.warning(msg if msg else "Local CRM mirror attempted; Google Vault still OFF.")
         else:
             _ok, msg = log_to_sheets(
                 {
@@ -1014,13 +1004,10 @@ with calc_tab:
         result = prepare_recent_filings_parse(lead_url)
         if result.get("ok"):
             st.success(f"Reachable · HTTP {result.get('status_code')}")
+            st.caption("Live clerk parse not wired — prep only (no leads invented).")
             st.json({k: result[k] for k in result if k != "ok"})
         else:
             st.error(result.get("error", "Failed"))
-
-    with st.expander("Demo off-market lead ideas"):
-        for row in mock_tampa_offmarket_leads():
-            st.write(f"**{row['type']}** · {row['area']} — {row['note']}")
 
     st.markdown("---")
     st.subheader("Morning Pipeline (Contracts)")

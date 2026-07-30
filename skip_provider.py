@@ -69,7 +69,7 @@ def _owner_from_prop(prop: dict[str, Any], address: str) -> dict[str, Any]:
         mailing_address = str(mailing or address)
 
     return {
-        "owner_name": owner_name or "Owner on file (name unavailable)",
+        "owner_name": owner_name or "",
         "phone": "",  # RentCast does not provide owner cell numbers
         "email": "",
         "mailing_address": mailing_address or address,

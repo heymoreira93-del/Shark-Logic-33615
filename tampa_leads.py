@@ -78,32 +78,12 @@ def prepare_recent_filings_parse(url: str) -> dict[str, Any]:
                 "filed date",
             ],
             "next_step": (
-                "Replace this placeholder with a structured parser once you confirm "
-                "the HTML/JSON shape of Recent Filings results. Prefer official APIs "
-                "or permitted bulk downloads over brittle scraping."
+                "Live clerk parse is not wired yet. Confirm the HTML/JSON shape of "
+                "Recent Filings results, then add a structured parser. Prefer official "
+                "APIs or permitted bulk downloads over brittle scraping."
             ),
-            "sample_leads": [],
+            "leads": [],
+            "parse_wired": False,
         }
     except Exception as exc:
         return {"ok": False, "error": f"Could not reach URL: {exc}"}
-
-
-def mock_tampa_offmarket_leads() -> list[dict[str, str]]:
-    """Offline demo leads so the UI section is usable without scraping."""
-    return [
-        {
-            "type": "Lis Pendens",
-            "area": "Seminole Heights",
-            "note": "Placeholder — replace with live clerk parse",
-        },
-        {
-            "type": "Foreclosure Notice",
-            "area": "Ybor City",
-            "note": "Placeholder — replace with live clerk parse",
-        },
-        {
-            "type": "Lis Pendens",
-            "area": "South Tampa 33606",
-            "note": "Flood-risk zip — verify insurance before offer",
-        },
-    ]

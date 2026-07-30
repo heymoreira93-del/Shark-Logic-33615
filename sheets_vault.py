@@ -170,8 +170,14 @@ def log_to_sheets(new_row: dict[str, Any]) -> tuple[bool, str]:
 
     want_sheets = sheets_configured()
     if not want_sheets:
+        # Local CRM mirror is fine; do not report success as if Google Vault wrote.
         if crm_ok:
-            return True, "Saved to local CRM (Sheets not configured)."
+            return (
+                False,
+                "Google Sheets Vault OFF — not logged to Sheets. "
+                "Mirrored to local CRM only. Configure GOOGLE_SHEETS_URL / "
+                "[connections.gsheets] + [gcp_service_account] for live Log Deal.",
+            )
         return False, "Sheets not configured and local CRM save failed."
 
     try:

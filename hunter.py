@@ -4,7 +4,7 @@ Skip-trace hunter — locate owner from property address.
 Provider order:
 1. Built-in RentCast (owner name + mailing) — uses RENTCAST_API_KEY
 2. External SKIP_TRACE_API_URL + SKIP_TRACE_API_KEY
-3. Offline mock
+3. Not configured / not found (never invents owners)
 Then optional PEOPLE_DATA_API_* cell enrichment (RocketReach / Lusha / PropertyRadar style).
 """
 
@@ -66,8 +66,6 @@ def skip_trace(address: str) -> dict[str, Any] | None:
             print(f"Skip trace API error: {exc}")
 
     if not hit:
-        # Only invent a demo owner when NOTHING is configured.
-        # If RentCast / skip-trace keys exist, surface a miss — never fake an owner.
         if has_provider() or (api_url and api_key):
             hit = {
                 "owner_name": "",
@@ -82,11 +80,15 @@ def skip_trace(address: str) -> dict[str, Any] | None:
             }
         else:
             hit = {
-                "owner_name": "John Doe (mock - add RENTCAST_API_KEY for live owner)",
+                "owner_name": "",
                 "phone": "",
-                "email": "johndoe@example.com",
+                "email": "",
                 "mailing_address": address,
-                "source": "mock",
+                "source": "not_configured",
+                "error": (
+                    "Skip-trace OFF — set RENTCAST_API_KEY (owner name) and/or "
+                    "SKIP_TRACE_API_URL + SKIP_TRACE_API_KEY. Paste owner manually."
+                ),
             }
 
     if not (hit.get("phone") or "").strip() and people_data_configured():

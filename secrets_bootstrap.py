@@ -148,12 +148,80 @@ def app_base_url() -> str:
     return raw or "http://localhost:8501"
 
 
+def _is_live_stripe_key(val: str | None) -> bool:
+    raw = (val or "").strip().strip('"').strip("'")
+    return raw.startswith("sk_live_") or raw.startswith("rk_live_")
+
+
+def _is_test_stripe_key(val: str | None) -> bool:
+    raw = (val or "").strip().strip('"').strip("'")
+    return raw.startswith("sk_test_") or raw.startswith("rk_test_")
+
+
+def _windows_user_env(name: str) -> str | None:
+    """Read a User-scope env var on Windows (survives shells that missed a refresh)."""
+    if os.name != "nt":
+        return None
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"[Environment]::GetEnvironmentVariable('{name}', 'User')",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _prefer_live_stripe_key() -> None:
+    """If any intended source has a live Stripe key, make it win over test.
+
+    Priority (first live found wins): process env → Windows User env → .env →
+    already-loaded aliases. Never invents keys; only promotes an existing live key.
+    """
+    canonical = "STRIPE_SECRET_KEY"
+    current = (os.getenv(canonical) or "").strip()
+    if _is_live_stripe_key(current):
+        return
+
+    candidates: list[str] = []
+    for alt in (canonical, "STRIPE_KEY", "STRIPE_API_KEY"):
+        v = (os.getenv(alt) or "").strip()
+        if v:
+            candidates.append(v)
+    user_v = _windows_user_env(canonical)
+    if user_v:
+        candidates.append(user_v.strip())
+    try:
+        from dotenv import dotenv_values
+
+        file_v = (dotenv_values() or {}).get(canonical)
+        if file_v:
+            candidates.append(str(file_v).strip())
+    except Exception:
+        pass
+
+    for cand in candidates:
+        if _is_live_stripe_key(cand) and not is_placeholder_secret(cand):
+            os.environ[canonical] = cand
+            return
+
+
 def _restore_dotenv_over_placeholders() -> None:
     """Put real .env values back when secrets.toml templates clobbered os.environ.
 
     Local rule: a non-placeholder value in the project `.env` wins over empty /
     placeholder process values (typical Streamlit secrets.toml stub sync).
     On Streamlit Cloud, existing non-placeholder env (Cloud inject) is kept.
+    Never replace a live Stripe key with a test key from `.env`.
     """
     try:
         from dotenv import dotenv_values
@@ -166,20 +234,27 @@ def _restore_dotenv_over_placeholders() -> None:
             if not cleaned or is_placeholder_secret(cleaned):
                 continue
             existing = (os.getenv(key) or "").strip()
+            # Stripe: live always beats test, regardless of source order.
+            if key == "STRIPE_SECRET_KEY" or key in ("STRIPE_KEY", "STRIPE_API_KEY"):
+                if _is_live_stripe_key(existing) and _is_test_stripe_key(cleaned):
+                    continue
+                if _is_test_stripe_key(existing) and _is_live_stripe_key(cleaned):
+                    os.environ["STRIPE_SECRET_KEY"] = cleaned
+                    continue
             if (not existing) or is_placeholder_secret(existing):
                 os.environ[key] = cleaned
                 continue
-            # Local only: if both look real but differ, prefer explicit .env
-            # for project keys so Cloud stubs / stale shells do not stick.
+            # Local only: if both look real but differ, keep process value when it
+            # is a deliberate User/system override (especially a live Stripe key).
+            # Do NOT clobber live process env with a stale test `.env` line.
             if (
                 not cloud
                 and key in SECRET_KEYS
                 and existing != cleaned
                 and is_placeholder_secret(existing) is False
             ):
-                # Prefer .env when the process value is a known template shape
-                # already handled above; keep process when it is a deliberate
-                # User/system override (same length class / live key). No-op.
+                if key == "STRIPE_SECRET_KEY" and _is_live_stripe_key(existing):
+                    continue
                 pass
     except Exception:
         pass
@@ -218,9 +293,26 @@ def bootstrap_secrets() -> None:
             if not cleaned or is_placeholder_secret(cleaned):
                 return
             existing = (os.getenv(key) or "").strip()
+            # Live Stripe key always wins over test (Cloud/local paste order).
+            if key == "STRIPE_SECRET_KEY" and _is_live_stripe_key(cleaned) and _is_test_stripe_key(
+                existing
+            ):
+                os.environ[key] = cleaned
+                return
+            if key == "STRIPE_SECRET_KEY" and _is_live_stripe_key(existing) and _is_test_stripe_key(
+                cleaned
+            ):
+                return
             if existing and not is_placeholder_secret(existing) and not overwrite:
                 return
             if key in snapshot and not overwrite:
+                # Prefer live snapshot over incoming test.
+                snap = snapshot.get(key, "")
+                if key == "STRIPE_SECRET_KEY" and _is_test_stripe_key(snap) and _is_live_stripe_key(
+                    cleaned
+                ):
+                    os.environ[key] = cleaned
+                    return
                 os.environ[key] = snapshot[key]
                 return
             os.environ[key] = cleaned
@@ -314,7 +406,15 @@ def bootstrap_secrets() -> None:
         cur = (os.getenv(key) or "").strip()
         if is_placeholder_secret(cur):
             os.environ[key] = prev
+        # Do not restore a snapshotted test key over a live key that arrived later.
+        if (
+            key == "STRIPE_SECRET_KEY"
+            and _is_live_stripe_key(cur)
+            and _is_test_stripe_key(prev)
+        ):
+            continue
     _restore_dotenv_over_placeholders()
+    _prefer_live_stripe_key()
 
     # Never leave Cloud sessions with localhost deal/Stripe links.
     try:

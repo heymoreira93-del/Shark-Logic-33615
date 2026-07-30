@@ -411,15 +411,15 @@ def rentcast_status() -> dict[str, Any]:
         "Does NOT return cell phones.",
     ]
     if not ready:
-        notes.insert(0, "Missing RENTCAST_API_KEY — app will use MOCK property/comps.")
+        notes.insert(0, "Missing RENTCAST_API_KEY — live property/comps OFF (no mock data).")
     else:
-        notes.insert(0, "Live RentCast ON — no silent mock when API returns data.")
+        notes.insert(0, "Live RentCast ON — empty results stay empty (no invented comps).")
     return {
         "ready": ready,
         "label": "RentCast Data",
         "notes": notes,
         "missing": missing,
-        "mode": "live" if ready else "mock",
+        "mode": "live" if ready else "off",
     }
 
 
