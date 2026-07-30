@@ -55,6 +55,10 @@ SECRET_ALIASES: dict[str, tuple[str, ...]] = {
     "TWILIO_AUTH_TOKEN": ("TWILIO_TOKEN", "AUTH_TOKEN"),
     "TWILIO_PHONE_NUMBER": ("TWILIO_FROM", "TWILIO_NUMBER", "FROM_NUMBER"),
     "RENTCAST_API_KEY": ("RENTCAST_KEY",),
+    # Older skip-trace vendor paste → people-data phones
+    "PEOPLE_DATA_API_URL": ("SKIP_TRACE_API_URL", "BATCHDATA_API_URL"),
+    "PEOPLE_DATA_API_KEY": ("SKIP_TRACE_API_KEY", "BATCHDATA_API_KEY"),
+    "GOOGLE_SHEETS_URL": ("SHEETS_URL", "GSHEETS_URL"),
 }
 
 # Template / example values that must NEVER overwrite a real .env key
@@ -145,10 +149,16 @@ def app_base_url() -> str:
 
 
 def _restore_dotenv_over_placeholders() -> None:
-    """Put real .env values back when secrets.toml templates clobbered os.environ."""
+    """Put real .env values back when secrets.toml templates clobbered os.environ.
+
+    Local rule: a non-placeholder value in the project `.env` wins over empty /
+    placeholder process values (typical Streamlit secrets.toml stub sync).
+    On Streamlit Cloud, existing non-placeholder env (Cloud inject) is kept.
+    """
     try:
         from dotenv import dotenv_values
 
+        cloud = running_on_streamlit_cloud()
         for key, val in (dotenv_values() or {}).items():
             if val is None:
                 continue
@@ -158,6 +168,19 @@ def _restore_dotenv_over_placeholders() -> None:
             existing = (os.getenv(key) or "").strip()
             if (not existing) or is_placeholder_secret(existing):
                 os.environ[key] = cleaned
+                continue
+            # Local only: if both look real but differ, prefer explicit .env
+            # for project keys so Cloud stubs / stale shells do not stick.
+            if (
+                not cloud
+                and key in SECRET_KEYS
+                and existing != cleaned
+                and is_placeholder_secret(existing) is False
+            ):
+                # Prefer .env when the process value is a known template shape
+                # already handled above; keep process when it is a deliberate
+                # User/system override (same length class / live key). No-op.
+                pass
     except Exception:
         pass
 

@@ -120,39 +120,44 @@ def get_property_data(address: str) -> dict[str, Any] | None:
 def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0) -> list[dict[str, Any]]:
     """
     Recent sold comps within radius (default 2 miles). Falls back to mock.
+    Uses RentCast /properties + saleDateRange (true solds), not active listings.
     """
     address = (address or "").strip()
     zip_code = zip_code or extract_zip(address)
+    get_tampa_comps.last_error = ""  # type: ignore[attr-defined]
     if not has_rentcast_key():
         return _mock_comps(address)
 
     try:
-        params = {
-            "status": "Sold",
+        # RentCast: radius requires address OR lat/lng — zip+radius alone returns 400.
+        params: dict[str, Any] = {
             "limit": 10,
-            "radius": radius_miles,
+            "saleDateRange": 365,
         }
-        if zip_code:
+        geo = geocode_address(address) if address else None
+        if geo:
+            params["latitude"] = geo["lat"]
+            params["longitude"] = geo["lng"]
+            params["radius"] = radius_miles
+        elif address:
+            params["address"] = address
+            params["radius"] = radius_miles
+        elif zip_code:
             params["zipCode"] = zip_code
         else:
             params["city"] = "Tampa"
             params["state"] = "FL"
 
-        geo = geocode_address(address)
-        if geo:
-            params["latitude"] = geo["lat"]
-            params["longitude"] = geo["lng"]
-
         query = "&".join(f"{k}={quote(str(v))}" for k, v in params.items())
-        url = f"{RENTCAST_BASE}/listings/sale?{query}"
+        url = f"{RENTCAST_BASE}/properties?{query}"
         resp = requests.get(url, headers=_headers(), timeout=25)
         resp.raise_for_status()
         payload = resp.json()
-        listings = payload if isinstance(payload, list) else payload.get("listings") or []
+        listings = payload if isinstance(payload, list) else payload.get("properties") or []
 
         comps: list[dict[str, Any]] = []
         for item in listings:
-            price = float(item.get("price") or item.get("soldPrice") or 0)
+            price = float(item.get("lastSalePrice") or item.get("price") or 0)
             sqft = float(item.get("squareFootage") or item.get("livingArea") or 0)
             if price <= 0:
                 continue
@@ -169,14 +174,22 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
                     "baths": item.get("bathrooms") or "?",
                     "sqft": int(sqft) if sqft else 0,
                     "price_per_sqft": (price / sqft) if sqft else 0,
+                    "sale_date": item.get("lastSaleDate") or "",
                 }
             )
         # Live mode: never invent mock solds when the key is present.
         # Empty list = thin market / API miss — UI should say so, not fake ARV.
         return comps[:10]
     except Exception as exc:
-        print(f"RentCast comps error: {exc}")
+        try:
+            print(f"RentCast comps error: {exc}")
+        except Exception:
+            pass
+        get_tampa_comps.last_error = str(exc)  # type: ignore[attr-defined]
         return []
+
+
+get_tampa_comps.last_error = ""  # type: ignore[attr-defined]
 
 
 def estimate_arv_from_comps(sqft: float, comps: list[dict[str, Any]]) -> tuple[float, float]:
