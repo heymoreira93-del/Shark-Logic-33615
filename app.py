@@ -44,7 +44,10 @@ from rehab import (
     tampa_hazard_check,
 )
 from sheets_vault import log_to_sheets, read_leads, sheets_configured
-from tampa_config import DEFAULT_CLOSING_COST_PCT, HIGH_RISK_FLOOD_HIT, MANUAL_FLOOD_MAO_HIT
+from tampa_config import DEFAULT_CLOSING_COST_PCT, MANUAL_FLOOD_MAO_HIT
+
+# Alias: High Risk Flood Zone AE hit ($15k) — same as MANUAL_FLOOD_MAO_HIT
+HIGH_RISK_FLOOD_HIT = MANUAL_FLOOD_MAO_HIT
 from tampa_leads import mock_tampa_offmarket_leads, prepare_recent_filings_parse
 from war_room import render_war_room
 
