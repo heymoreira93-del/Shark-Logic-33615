@@ -144,9 +144,8 @@ def app_base_url() -> str:
     return raw or "http://localhost:8501"
 
 
-def bootstrap_secrets() -> None:
-    """Copy Streamlit Cloud secrets into the environment when present."""
-    # If secrets.toml placeholders clobbered .env, restore real dotenv values first.
+def _restore_dotenv_over_placeholders() -> None:
+    """Put real .env values back when secrets.toml templates clobbered os.environ."""
     try:
         from dotenv import dotenv_values
 
@@ -162,17 +161,32 @@ def bootstrap_secrets() -> None:
     except Exception:
         pass
 
+
+def bootstrap_secrets() -> None:
+    """Copy Streamlit Cloud secrets into the environment when present."""
+    # Snapshot + restore: accessing st.secrets can sync secrets.toml placeholders
+    # into os.environ and wipe real .env values.
+    _restore_dotenv_over_placeholders()
+    snapshot: dict[str, str] = {}
+    for key in SECRET_KEYS:
+        cur = (os.getenv(key) or "").strip()
+        if cur and not is_placeholder_secret(cur):
+            snapshot[key] = cur
+
     try:
         import streamlit as st
 
         secrets = getattr(st, "secrets", None)
         if secrets is None:
+            _restore_dotenv_over_placeholders()
+            try:
+                os.environ["APP_BASE_URL"] = app_base_url()
+            except Exception:
+                pass
             return
 
         def _set(key: str, val: object, *, overwrite: bool = False) -> None:
-            """Inject secret into os.environ. Never writes placeholders.
-            Prefer keeping a real existing env value over a secrets.toml template.
-            """
+            """Inject secret into os.environ. Never writes placeholders."""
             if val is None:
                 return
             cleaned = str(val).strip().strip('"').strip("'")
@@ -182,6 +196,9 @@ def bootstrap_secrets() -> None:
                 return
             existing = (os.getenv(key) or "").strip()
             if existing and not is_placeholder_secret(existing) and not overwrite:
+                return
+            if key in snapshot and not overwrite:
+                os.environ[key] = snapshot[key]
                 return
             os.environ[key] = cleaned
 
@@ -196,6 +213,9 @@ def bootstrap_secrets() -> None:
         for canonical, aliases in SECRET_ALIASES.items():
             cur = (os.getenv(canonical) or "").strip()
             if cur and not is_placeholder_secret(cur):
+                continue
+            if canonical in snapshot:
+                os.environ[canonical] = snapshot[canonical]
                 continue
             for alt in aliases:
                 try:
@@ -251,6 +271,9 @@ def bootstrap_secrets() -> None:
                 cur = (os.getenv(env_key) or "").strip()
                 if cur and not is_placeholder_secret(cur):
                     continue
+                if env_key in snapshot:
+                    os.environ[env_key] = snapshot[env_key]
+                    continue
                 for alias in aliases:
                     try:
                         _set(env_key, block[alias])
@@ -262,6 +285,13 @@ def bootstrap_secrets() -> None:
                         continue
     except Exception:
         pass
+
+    # Undo Streamlit's placeholder sync into os.environ
+    for key, prev in snapshot.items():
+        cur = (os.getenv(key) or "").strip()
+        if is_placeholder_secret(cur):
+            os.environ[key] = prev
+    _restore_dotenv_over_placeholders()
 
     # Never leave Cloud sessions with localhost deal/Stripe links.
     try:
