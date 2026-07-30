@@ -25,9 +25,14 @@ def _headers() -> dict[str, str]:
 
 
 def has_rentcast_key() -> bool:
-    return bool((os.getenv("RENTCAST_API_KEY") or "").strip()) and (
-        os.getenv("RENTCAST_API_KEY", "").strip() not in {"your_key_here", "your_rentcast_key"}
-    )
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+    key = (os.getenv("RENTCAST_API_KEY") or "").strip()
+    return bool(key) and key not in {"your_key_here", "your_rentcast_key", ""}
 
 
 def extract_zip(address: str, fallback: str = "") -> str:
@@ -160,10 +165,12 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
                     "price_per_sqft": (price / sqft) if sqft else 0,
                 }
             )
-        return comps[:10] if comps else _mock_comps(address)
+        # Live mode: never invent mock solds when the key is present.
+        # Empty list = thin market / API miss — UI should say so, not fake ARV.
+        return comps[:10]
     except Exception as exc:
         print(f"RentCast comps error: {exc}")
-        return _mock_comps(address)
+        return []
 
 
 def estimate_arv_from_comps(sqft: float, comps: list[dict[str, Any]]) -> tuple[float, float]:
@@ -202,6 +209,8 @@ def get_tampa_data(address: str) -> dict[str, Any]:
         arv = float(prop["lastSalePrice"]) * 1.15
         avg_pps = (arv / sqft) if sqft else 0
 
+    live = has_rentcast_key()
+    source = prop.get("source", "rentcast" if live else "mock")
     return {
         "address": address,
         "yearBuilt": prop.get("yearBuilt"),
@@ -212,8 +221,10 @@ def get_tampa_data(address: str) -> dict[str, Any]:
         "arv": round(arv, 2),
         "avg_sqft_price": round(avg_pps, 2),
         "comps": comps,
+        "comps_live": live,
+        "comps_empty": live and not comps,
         "flood_risk": zip_code in FLOOD_ZIPS,
-        "source": prop.get("source", "rentcast" if has_rentcast_key() else "mock"),
+        "source": source,
     }
 
 

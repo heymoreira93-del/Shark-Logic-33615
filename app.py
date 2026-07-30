@@ -34,7 +34,7 @@ from db import (
 from email_blast import alert_buyers, email_configured
 from generator import generate_contract
 from hunter import skip_trace
-from payments import create_checkout_session, emd_amount_dollars, stripe_configured
+from payments import create_checkout_session, emd_amount_dollars, stripe_configured, stripe_mode
 from rehab import (
     apply_tampa_risk_adjustments,
     calculate_rehab,
@@ -245,13 +245,16 @@ with status_tab:
     render_systems_check()
     st.markdown(
         """
-**Go-Live checklist**
-1. Stripe: use live key (`sk_live_...`) + `APP_BASE_URL` with no trailing slash
-2. Gmail: 2FA + App Password for `EMAIL_USER` / `EMAIL_PASS` + `BUYER_EMAILS`
-3. Prefer **email blast** until Twilio 10DLC is registered (trial SMS is nearly useless)
-4. Call Hillsborough title (Sunbelt / Bay Title) — confirm they handle assignments
-5. Paste their wire info into Secrets: `WIRE_BANK`, `WIRE_ROUTING`, `WIRE_ACCOUNT`, `TITLE_COMPANY_NAME`
-6. Optional phones: `PEOPLE_DATA_API_URL` + `PEOPLE_DATA_API_KEY` (RocketReach / Lusha / PropertyRadar style)
+**Go-Live checklist (tonight)**
+1. **Stripe:** `sk_live_...` (or `rk_live_...`) + `APP_BASE_URL` with **no trailing slash**
+2. **Gmail:** 2FA + App Password → `EMAIL_USER` / `EMAIL_PASS` + comma-separated `BUYER_EMAILS`
+3. **Twilio:** top-level `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` (+E.164) → **Reboot** after paste
+4. Prefer **email blast** until Twilio **10DLC** is registered (trial SMS ≈ verified numbers only)
+5. **Sheets:** `[connections.gsheets]` + share Leads tab with service-account email
+6. **RentCast:** `RENTCAST_API_KEY` (owner name + comps — not cell phones)
+7. Call Hillsborough title — confirm assignments; paste `WIRE_*` / `TITLE_COMPANY_NAME`
+8. Optional phones: `PEOPLE_DATA_API_URL` + `PEOPLE_DATA_API_KEY`
+9. Cloud: Settings → Secrets → Save → **Manage app → Reboot**
         """
     )
 
@@ -307,6 +310,13 @@ with calc_tab:
                         f"{st.session_state.sqft:,.0f} sqft · "
                         f"source={st.session_state.data_source}"
                     )
+                    if st.session_state.data_source == "mock":
+                        st.warning("MOCK data — add RENTCAST_API_KEY for live ARV/comps.")
+                    elif not st.session_state.comps:
+                        st.warning(
+                            "Live RentCast returned no nearby sold comps. "
+                            "ARV may rely on last-sale estimate — verify manually."
+                        )
 
         if do_trace:
             if not address.strip():
@@ -314,19 +324,35 @@ with calc_tab:
             else:
                 hit = skip_trace(address.strip())
                 if hit:
-                    st.session_state.seller_name = hit.get("owner_name") or ""
-                    st.session_state.seller_phone = hit.get("phone") or ""
-                    st.session_state.seller_email = hit.get("email") or ""
                     src = hit.get("source") or "unknown"
-                    st.success(f"Located: **{st.session_state.seller_name}** · source=`{src}`")
-                    if hit.get("mailing_address"):
-                        st.caption(f"Mailing: {hit.get('mailing_address')}")
-                    if not hit.get("phone"):
-                        st.info(
-                            "Owner name pulled from RentCast. "
-                            "No cell on file — paste mobile manually for SMS "
-                            "(people-data phone vendors are separate from BatchData)."
+                    if src == "not_found" or hit.get("error"):
+                        st.warning(
+                            hit.get("error")
+                            or "Live skip-trace configured but no owner found for this address."
                         )
+                        st.caption(f"source=`{src}` — paste owner name / phone manually.")
+                    elif src == "mock":
+                        st.warning(
+                            "MOCK owner (no RENTCAST_API_KEY). Add key for live owner names."
+                        )
+                        st.session_state.seller_name = hit.get("owner_name") or ""
+                        st.session_state.seller_phone = hit.get("phone") or ""
+                        st.session_state.seller_email = hit.get("email") or ""
+                    else:
+                        st.session_state.seller_name = hit.get("owner_name") or ""
+                        st.session_state.seller_phone = hit.get("phone") or ""
+                        st.session_state.seller_email = hit.get("email") or ""
+                        st.success(
+                            f"Located: **{st.session_state.seller_name or '(name blank)'}** · source=`{src}`"
+                        )
+                        if hit.get("mailing_address"):
+                            st.caption(f"Mailing: {hit.get('mailing_address')}")
+                        if not hit.get("phone"):
+                            st.info(
+                                "Owner name pulled from RentCast. "
+                                "No cell on file — paste mobile manually for SMS "
+                                "(people-data vendors are separate)."
+                            )
                 else:
                     st.error("Skip trace returned nothing.")
 
@@ -622,11 +648,17 @@ with calc_tab:
 
     emd = emd_amount_dollars()
     gate_on = stripe_configured()
+    mode = stripe_mode()
     st.caption(
         f"Sheets: {'ON' if sheets_configured() else 'local CRM'} · "
-        f"Stripe EMD: {'ON ($' + f'{emd:,.0f})' if gate_on else 'OFF'} · "
+        f"Stripe EMD: {'ON ($' + f'{emd:,.0f}, ' + mode + ')' if gate_on else 'OFF'} · "
         f"Email blast: {'ON' if email_configured() else 'OFF'}"
     )
+    if mode == "live":
+        st.caption(
+            "Stripe is on LIVE keys. If checkout fails with 'cannot make live charges', "
+            "finish Stripe Activate / identity, or use sk_test_ until approved."
+        )
 
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
@@ -691,7 +723,8 @@ with calc_tab:
                     if checkout_url:
                         st.info(f"EMD lock link: {checkout_url}")
                     else:
-                        st.warning("Stripe session failed — check STRIPE_SECRET_KEY.")
+                        err = getattr(create_checkout_session, "last_error", "") or "check STRIPE_SECRET_KEY"
+                        st.error(f"Stripe session failed: {err}")
                 else:
                     st.session_state.paid = True
 
@@ -768,15 +801,25 @@ with calc_tab:
             )
         elif st.button("Create EMD Checkout Link", use_container_width=True):
             if address.strip():
-                url = create_checkout_session(
-                    address=address.strip(),
-                    assignment_fee=float(assignment_fee),
-                )
+                try:
+                    url = create_checkout_session(
+                        address=address.strip(),
+                        assignment_fee=float(assignment_fee),
+                    )
+                except Exception as exc:
+                    url = None
+                    st.error(f"Stripe error: {exc}")
                 if url:
                     st.session_state.checkout_url = url
                     st.rerun()
                 else:
-                    st.error("Could not create Stripe session.")
+                    err = getattr(create_checkout_session, "last_error", "") or "Could not create Stripe session."
+                    st.error(err)
+                    if stripe_mode() == "live":
+                        st.info(
+                            "Your account cannot take LIVE charges yet. "
+                            "Switch STRIPE_SECRET_KEY to sk_test_... (Test mode) or finish Stripe Activate."
+                        )
             else:
                 st.error("Enter address first.")
     else:

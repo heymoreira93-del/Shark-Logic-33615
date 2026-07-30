@@ -5,10 +5,15 @@ Load secrets into os.environ for local (.env) and Streamlit Cloud (st.secrets).
 from __future__ import annotations
 
 import os
+from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Public production app — used when Cloud would otherwise emit localhost links.
+PUBLIC_APP_BASE_URL = "https://realestateshark.streamlit.app"
 
 SECRET_KEYS = (
     "RENTCAST_API_KEY",
@@ -16,6 +21,8 @@ SECRET_KEYS = (
     "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "TWILIO_PHONE_NUMBER",
+    "TWILIO_AGENT_PHONE",
+    "TWILIO_VOICE_WEBHOOK",
     "NOTIFY_PHONE",
     "APP_BASE_URL",
     "SKIP_TRACE_API_URL",
@@ -38,6 +45,40 @@ SECRET_KEYS = (
 )
 
 
+def is_localhost_base_url(url: str | None) -> bool:
+    """True when URL is empty or clearly a local-only host."""
+    raw = (url or "").strip()
+    if not raw:
+        return True
+    host = (urlparse(raw).hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} or host.endswith(".local")
+
+
+def running_on_streamlit_cloud() -> bool:
+    """Best-effort Streamlit Community Cloud detection."""
+    if os.getenv("STREAMLIT_SHARING_MODE"):
+        return True
+    if (os.getenv("STREAMLIT_RUNTIME_ENV") or "").lower() == "cloud":
+        return True
+    host = (os.getenv("HOSTNAME") or os.getenv("SERVER_NAME") or "").lower()
+    if "streamlit" in host:
+        return True
+    return Path("/mount/src").exists()
+
+
+def app_base_url() -> str:
+    """
+    Base URL for Stripe returns, SMS, and email links (no trailing slash).
+    Prefer APP_BASE_URL; on Streamlit Cloud never emit localhost.
+    """
+    raw = (os.getenv("APP_BASE_URL") or "").strip().rstrip("/")
+    if raw and not is_localhost_base_url(raw):
+        return raw
+    if running_on_streamlit_cloud():
+        return PUBLIC_APP_BASE_URL
+    return raw or "http://localhost:8501"
+
+
 def bootstrap_secrets() -> None:
     """Copy Streamlit Cloud secrets into the environment when present."""
     try:
@@ -49,7 +90,10 @@ def bootstrap_secrets() -> None:
 
         def _set(key: str, val: object) -> None:
             if val is not None and str(val).strip():
-                os.environ[key] = str(val).strip().strip('"').strip("'")
+                cleaned = str(val).strip().strip('"').strip("'")
+                if key == "APP_BASE_URL":
+                    cleaned = cleaned.rstrip("/")
+                os.environ[key] = cleaned
 
         for key in SECRET_KEYS:
             try:
@@ -57,6 +101,15 @@ def bootstrap_secrets() -> None:
             except Exception:
                 continue
             _set(key, val)
+
+        # Flatten [connections.gsheets].spreadsheet → GOOGLE_SHEETS_URL when unset
+        try:
+            gsheets = secrets["connections"]["gsheets"]
+            sheet_url = gsheets.get("spreadsheet") if hasattr(gsheets, "get") else gsheets["spreadsheet"]
+            if sheet_url and not os.getenv("GOOGLE_SHEETS_URL"):
+                _set("GOOGLE_SHEETS_URL", sheet_url)
+        except Exception:
+            pass
 
         # Nested [twilio] / [stripe] / [email] tables (common paste mistake)
         nested = {
@@ -94,5 +147,11 @@ def bootstrap_secrets() -> None:
                             break
                     except Exception:
                         continue
+    except Exception:
+        pass
+
+    # Never leave Cloud sessions with localhost deal/Stripe links.
+    try:
+        os.environ["APP_BASE_URL"] = app_base_url()
     except Exception:
         pass

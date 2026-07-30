@@ -81,6 +81,7 @@ def log_to_sheets(new_row: dict[str, Any]) -> tuple[bool, str]:
         row["last_contacted"] = row["timestamp"]
 
     # Always mirror to local CRM so follow-ups still work offline
+    crm_ok = False
     try:
         from crm import add_lead
 
@@ -93,8 +94,15 @@ def log_to_sheets(new_row: dict[str, Any]) -> tuple[bool, str]:
             zip_code=str(row.get("zip_code") or ""),
             buyer_name=str(row.get("buyer_name") or ""),
         )
+        crm_ok = True
     except Exception as exc:
         print(f"CRM mirror failed: {exc}")
+
+    want_sheets = sheets_configured()
+    if not want_sheets:
+        if crm_ok:
+            return True, "Saved to local CRM (Sheets not configured)."
+        return False, "Sheets not configured and local CRM save failed."
 
     try:
         import streamlit as st
@@ -108,4 +116,8 @@ def log_to_sheets(new_row: dict[str, Any]) -> tuple[bool, str]:
         conn.update(worksheet="Leads", data=updated)
         return True, "Deal locked in the Google Vault (+ local CRM mirror)."
     except Exception as exc:
-        return True, f"Saved to local CRM (Sheets unavailable: {exc})"
+        # Configured but failed — do not pretend Sheets wrote successfully.
+        msg = f"Sheets configured but write failed: {exc}"
+        if crm_ok:
+            return False, f"{msg} (saved to local CRM only)."
+        return False, msg
