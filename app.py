@@ -14,15 +14,10 @@ from secrets_bootstrap import bootstrap_secrets
 
 bootstrap_secrets()
 
+import crm as _crm
+
 from comms import notify_deal_signed, send_offer_sms, signing_url
 from contract_gen import generate_assignment_pdf
-from crm import add_lead as crm_add_lead
-from crm import get_leads as crm_get_leads
-from crm import get_stale_leads
-from crm import init_db as init_crm_db
-from crm import pipeline_snapshot
-from crm import update_contact_date
-from crm import update_contact_date_by_id
 from data_engine import extract_zip, get_tampa_comps, get_tampa_data, has_rentcast_key
 from database import init_db as init_tampa_db
 from database import save_lead
@@ -36,9 +31,10 @@ from db import (
     mark_as_signed,
     update_lead_temp,
 )
+from email_blast import alert_buyers, email_configured
 from generator import generate_contract
 from hunter import skip_trace
-from tampa_config import DEFAULT_CLOSING_COST_PCT, MANUAL_FLOOD_MAO_HIT
+from payments import create_checkout_session, emd_amount_dollars, stripe_configured
 from rehab import (
     apply_tampa_risk_adjustments,
     calculate_rehab,
@@ -47,8 +43,19 @@ from rehab import (
     shark_mao,
     tampa_hazard_check,
 )
+from sheets_vault import log_to_sheets, read_leads, sheets_configured
+from tampa_config import DEFAULT_CLOSING_COST_PCT, HIGH_RISK_FLOOD_HIT, MANUAL_FLOOD_MAO_HIT
 from tampa_leads import mock_tampa_offmarket_leads, prepare_recent_filings_parse
 from war_room import render_war_room
+
+# Bind CRM helpers after full module load (avoids Streamlit stale-import crashes)
+crm_add_lead = _crm.add_lead
+crm_get_leads = _crm.get_leads
+get_stale_leads = _crm.get_stale_leads
+init_crm_db = _crm.init_db
+pipeline_snapshot = _crm.pipeline_snapshot
+update_contact_date = _crm.update_contact_date
+update_contact_date_by_id = _crm.update_contact_date_by_id
 
 st.set_page_config(page_title="DealShark Tampa", layout="wide", initial_sidebar_state="expanded")
 
@@ -148,6 +155,18 @@ emd = st.sidebar.number_input("Earnest Money ($)", value=1000, step=100)
 closing_days = st.sidebar.number_input("Close in (days)", 7, 90, 21)
 inspection_days = st.sidebar.number_input("Inspection Days", 1, 30, 7)
 closing_pct = st.sidebar.slider("Closing Costs %", 1.0, 5.0, DEFAULT_CLOSING_COST_PCT * 100, 0.5) / 100
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Flood Zone")
+high_risk_flood = st.sidebar.checkbox(
+    "High Risk Flood Zone?",
+    value=False,
+    help="Zone AE / 33615 flood tax: shave $15,000 off MAO. Flags PDF + buyer email.",
+    key="sidebar_high_risk_flood",
+)
+if high_risk_flood:
+    st.sidebar.warning(f"Flood Risk ON. MAO -$15k ({HIGH_RISK_FLOOD_HIT:,.0f}).")
+    st.sidebar.caption("Flood Insurance Required on PDF + buyer email.")
 
 if has_rentcast_key():
     st.sidebar.success("RentCast API key detected — live data ON.")
@@ -291,29 +310,31 @@ with calc_tab:
 
         zip_guess = st.session_state.zip_code or extract_zip(address)
         hazard = tampa_hazard_check(zip_guess)
+        # Sidebar Flood Zone drives the $15k High Risk hit; zip auto still informs UI
+        flood_toggle = high_risk_flood or bool(hazard.get("is_flood_zip"))
 
-        flood_toggle = st.toggle(
-            "Flood Zone (manual)",
-            value=bool(hazard.get("is_flood_zip")),
-            help="Auto-ON for known South Tampa / coastal zips.",
-            key="calc_flood",
-        )
         hvhz = st.toggle("High-Velocity Hurricane Zone (HVHZ)", value=False, key="calc_hvhz")
 
         # Shark Alert UI — elevated/high = error, moderate = warning, else success
-        if hazard.get("buffer_deduction", 0) > 0 or flood_toggle:
+        if high_risk_flood or hazard.get("buffer_deduction", 0) > 0:
             tier = hazard.get("tier") or "high"
-            risk_label = hazard.get("risk_level") or "HIGH (Flood Zone - manual)"
-            buffer_shown = float(
-                hazard.get("buffer_deduction") or (MANUAL_FLOOD_MAO_HIT if flood_toggle else 0)
+            risk_label = (
+                "HIGH RISK FLOOD ZONE (AE)"
+                if high_risk_flood
+                else (hazard.get("risk_level") or "HIGH (Flood Zone)")
             )
-            if tier == "moderate" and not flood_toggle:
+            buffer_shown = float(hazard.get("buffer_deduction") or 0)
+            if high_risk_flood:
+                buffer_shown = max(buffer_shown, HIGH_RISK_FLOOD_HIT)
+            if tier == "moderate" and not high_risk_flood:
                 st.warning(f"{risk_label} DETECTED")
             else:
                 st.error(f"{risk_label} DETECTED")
             st.write(
                 f"Automatically deducted **${buffer_shown:,.0f}** from MAO for flood insurance buffer."
             )
+            if high_risk_flood:
+                st.error("Flood Insurance Required — buyer mortgage risk is real in 33615 AE.")
             if hazard.get("warning"):
                 st.caption(hazard["warning"])
         else:
@@ -364,7 +385,9 @@ with calc_tab:
     flood_buffer = 0.0
     if hazard.get("is_flood_zip"):
         flood_buffer = float(hazard.get("buffer_deduction") or 0)
-    elif flood_toggle:
+    if high_risk_flood:
+        flood_buffer = max(flood_buffer, HIGH_RISK_FLOOD_HIT)
+    elif flood_toggle and flood_buffer <= 0:
         flood_buffer = MANUAL_FLOOD_MAO_HIT
 
     with kill:
@@ -408,6 +431,8 @@ with calc_tab:
         risk = hazard_adj["risk_level"]
         if flood_toggle and not hazard_adj.get("is_flood_zip"):
             risk = "HIGH (Flood Zone - manual)"
+        if high_risk_flood:
+            risk = "HIGH RISK FLOOD ZONE (AE)"
         return save_lead(
             address=address.strip(),
             zip_code=zip_code,
@@ -415,7 +440,7 @@ with calc_tab:
             mao=final_mao,
             fee=float(offers["fee_used"]),
             risk=risk,
-            flood_risk=bool(hazard_adj.get("is_flood_zip") or flood_toggle),
+            flood_risk=bool(hazard_adj.get("is_flood_zip") or flood_toggle or high_risk_flood),
             status=status,
             seller_name=seller_name.strip(),
             seller_phone=mobile.strip(),
@@ -448,6 +473,7 @@ with calc_tab:
                 comps=comps,
                 rehab_total=rehab["total"],
                 arv=effective_arv,
+                flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
             )
         )
         deal_id = create_deal(
@@ -518,13 +544,38 @@ with calc_tab:
                 if deal_id:
                     st.info(f"Deal saved. Seller link: {signing_url(deal_id)}")
 
-    # ----- Deal Closer / Assignment Payday -----
+    # ----- Shark Command Center (Sheets + Stripe + Blast) -----
     st.markdown("---")
-    st.subheader("Deal Closer — The Payday")
+    st.subheader("Shark Command Center")
     st.caption(
-        "Lock the house at Shark MAO, find a cash buyer, assign for your fee. "
-        "PDF saves to contracts/ for your ledger."
+        "Google Vault · Stripe EMD gate · buyer blast · disbursement PDF. "
+        "PDF unlocks after EMD (or skip gate locally if Stripe is not configured)."
     )
+
+    # Honor Stripe success redirect
+    try:
+        q = st.query_params
+        if q.get("emd_paid") in ("1", "true", "True") or q.get("success") in ("1", "true", "True"):
+            st.session_state.paid = True
+        if q.get("emd_cancel") in ("1", "true", "True"):
+            st.session_state.paid = False
+    except Exception:
+        pass
+    if "paid" not in st.session_state:
+        st.session_state.paid = False
+    if "checkout_url" not in st.session_state:
+        st.session_state.checkout_url = ""
+    if "assign_pdf_path" not in st.session_state:
+        st.session_state.assign_pdf_path = ""
+
+    emd = emd_amount_dollars()
+    gate_on = stripe_configured()
+    st.caption(
+        f"Sheets: {'ON' if sheets_configured() else 'local CRM'} · "
+        f"Stripe EMD: {'ON ($' + f'{emd:,.0f})' if gate_on else 'OFF'} · "
+        f"Email blast: {'ON' if email_configured() else 'OFF'}"
+    )
+
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
         assignment_fee = st.number_input(
@@ -544,57 +595,150 @@ with calc_tab:
         st.metric("Contract / Shark Offer", f"${offer_price:,.0f}")
         st.caption(f"Spread if assigned: **${assignment_fee:,.0f}**")
 
-    closer_a, closer_b = st.columns(2)
+    closer_a, closer_b, closer_c = st.columns(3)
     with closer_a:
-        gen_assign = st.button("Generate Assignment PDF", type="primary", use_container_width=True)
+        blast = st.button("BLAST TO BUYERS & GENERATE", type="primary", use_container_width=True)
     with closer_b:
-        log_crm = st.button("Log to CRM (Offered)", use_container_width=True)
+        log_deal = st.button("Log Deal (Google Vault)", use_container_width=True)
+    with closer_c:
+        bypass = st.button("Unlock PDF (dev / wire)", use_container_width=True)
 
-    if gen_assign:
+    if bypass:
+        st.session_state.paid = True
+
+    if blast:
         if not address.strip():
             st.error("Enter a property address first.")
         else:
+            checkout_url = ""
+            if gate_on:
+                checkout_url = create_checkout_session(
+                    address=address.strip(),
+                    assignment_fee=float(assignment_fee),
+                ) or ""
+                st.session_state.checkout_url = checkout_url
+                if checkout_url:
+                    st.info(f"EMD lock link: {checkout_url}")
+                else:
+                    st.warning("Stripe session failed — check STRIPE_SECRET_KEY.")
+            else:
+                st.session_state.paid = True
+                st.warning("Stripe not configured — PDF unlocked for local/wire flow.")
+
             path = generate_assignment_pdf(
                 address.strip(),
                 cash_buyer.strip() or "TBD",
                 float(assignment_fee),
                 assignor_name=buyer_name.strip() or "DealShark Acquisitions",
                 purchase_price=float(offer_price),
+                flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
             )
-            st.success(
-                f"Contract ready in `contracts/` — send to title to secure your "
-                f"${assignment_fee:,.0f} fee."
+            st.session_state.assign_pdf_path = str(path)
+
+            pay_link = checkout_url or "(wire / unlock after EMD)"
+            if email_configured():
+                ok, msg = alert_buyers(
+                    address.strip(),
+                    float(arv),
+                    float(offer_price),
+                    float(assignment_fee),
+                    pay_link,
+                    flood_risk=bool(high_risk_flood or flood_buffer > 0),
+                )
+                if ok:
+                    st.success(f"Deal blasted to buyers. {msg}")
+                else:
+                    st.error(msg)
+            else:
+                st.info("Email blast skipped — set EMAIL_USER, EMAIL_PASS, BUYER_EMAILS.")
+
+            ok_s, msg_s = log_to_sheets(
+                {
+                    "name": seller_name.strip() or "Seller",
+                    "address": address.strip(),
+                    "zip_code": zip_guess or extract_zip(address) or "",
+                    "status": "Offered",
+                    "arv": float(arv),
+                    "mao": float(offer_price),
+                    "fee": float(assignment_fee),
+                    "buyer_name": cash_buyer.strip(),
+                    "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
+                }
             )
+            st.success(msg_s if ok_s else msg_s)
+
+    if log_deal:
+        if not address.strip():
+            st.error("Enter a property address first.")
+        else:
+            _ok, msg = log_to_sheets(
+                {
+                    "name": seller_name.strip() or "Seller",
+                    "address": address.strip(),
+                    "zip_code": zip_guess or extract_zip(address) or "",
+                    "status": "Offered",
+                    "arv": float(arv),
+                    "mao": float(offer_price),
+                    "fee": float(assignment_fee),
+                    "buyer_name": cash_buyer.strip(),
+                    "risk": "HIGH RISK FLOOD ZONE (AE)" if high_risk_flood else "",
+                }
+            )
+            st.success(msg)
+
+    # Paywall
+    paid = bool(st.session_state.paid) or not gate_on
+    if gate_on and not paid:
+        st.warning(f"Pay ${emd:,.0f} non-refundable EMD to unlock the contract PDF.")
+        if st.session_state.checkout_url:
+            st.markdown(
+                f"[LOCK THIS DEAL (Pay EMD)]({st.session_state.checkout_url})"
+            )
+        elif st.button("Create EMD Checkout Link", use_container_width=True):
+            if address.strip():
+                url = create_checkout_session(
+                    address=address.strip(),
+                    assignment_fee=float(assignment_fee),
+                )
+                if url:
+                    st.session_state.checkout_url = url
+                    st.rerun()
+                else:
+                    st.error("Could not create Stripe session.")
+            else:
+                st.error("Enter address first.")
+    else:
+        if st.session_state.paid and gate_on:
             st.balloons()
-            with path.open("rb") as f:
+            st.success("EMD received (or unlocked). Download Assignment + Wire Instructions:")
+        pdf_path = Path(st.session_state.assign_pdf_path) if st.session_state.assign_pdf_path else None
+        if pdf_path and pdf_path.exists():
+            with pdf_path.open("rb") as f:
                 st.download_button(
-                    "Download Contract & Get Paid",
+                    "Download Executed Contract",
                     f,
-                    file_name=path.name,
+                    file_name=pdf_path.name,
                     mime="application/pdf",
                     use_container_width=True,
                     key="dl_assign",
                 )
+        elif paid and address.strip():
+            if st.button("Generate PDF now", use_container_width=True):
+                path = generate_assignment_pdf(
+                    address.strip(),
+                    cash_buyer.strip() or "TBD",
+                    float(assignment_fee),
+                    assignor_name=buyer_name.strip() or "DealShark Acquisitions",
+                    purchase_price=float(offer_price),
+                    flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
+                )
+                st.session_state.assign_pdf_path = str(path)
+                st.rerun()
 
-    if log_crm:
-        if not address.strip():
-            st.error("Enter a property address first.")
-        else:
-            crm_id = crm_add_lead(
-                name=seller_name.strip() or "Seller",
-                address=address.strip(),
-                status="Offered",
-                mao=float(offer_price),
-                fee=float(assignment_fee),
-                zip_code=zip_guess or extract_zip(address),
-                buyer_name=cash_buyer.strip(),
-            )
-            st.success(f"CRM #{crm_id} logged as Offered · fee ${assignment_fee:,.0f}")
-
-    crm_df = crm_get_leads()
-    if not crm_df.empty:
-        with st.expander("CRM ledger (assignment deals)"):
-            st.dataframe(crm_df, use_container_width=True, hide_index=True)
+    vault_df = read_leads()
+    if not vault_df.empty:
+        with st.expander("Google Vault / CRM ledger"):
+            st.dataframe(vault_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.subheader("Tampa Off-Market Prep (Hillsborough Clerk)")

@@ -34,6 +34,7 @@ class ContractParties:
     comps: list[dict[str, Any]] = field(default_factory=list)
     rehab_total: float = 0.0
     arv: float = 0.0
+    flood_insurance_required: bool = False
 
 
 def balance_due(purchase_price: float, earnest_money: float) -> float:
@@ -91,6 +92,19 @@ def build_pdf(parties: ContractParties) -> FPDF:
     pdf.set_auto_page_break(auto=True, margin=14)
     pdf.add_page()
     pdf.set_font("Helvetica", size=10)
+
+    if parties.flood_insurance_required:
+        pdf.set_text_color(180, 0, 0)
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.multi_cell(
+            0,
+            6,
+            "WARNING: FLOOD INSURANCE REQUIRED - High Risk Flood Zone (AE). "
+            "MAO includes a $15,000 flood-risk buffer. Buyer must verify NFIP/private premiums.",
+        )
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(4)
+        pdf.set_font("Helvetica", size=10)
 
     pdf.set_font("Helvetica", "B", 10)
     pdf.write(5, "PARTIES: ")
@@ -207,6 +221,7 @@ def generate_contract(
     comps: list[dict[str, Any]] | None = None,
     rehab_total: float = 0.0,
     arv: float = 0.0,
+    flood_insurance_required: bool = False,
     output_dir: Path | None = None,
 ) -> Path:
     """Build DealShark PDF and save as STREETADDRESS_OFFER.pdf."""
@@ -229,6 +244,7 @@ def generate_contract(
             comps=comps or [],
             rehab_total=rehab_total,
             arv=arv,
+            flood_insurance_required=flood_insurance_required,
         )
     else:
         if parties.expiration_date is None:
@@ -241,6 +257,8 @@ def generate_contract(
             parties.rehab_total = rehab_total
         if arv:
             parties.arv = arv
+        if flood_insurance_required:
+            parties.flood_insurance_required = True
 
     out_dir = output_dir or CONTRACTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
