@@ -8,18 +8,45 @@ import os
 
 
 _STRIPE_PLACEHOLDERS = frozenset(
-    {"", "sk_test_...", "sk_live_...", "rk_test_...", "rk_live_...", "your_key_here"}
+    {
+        "",
+        "sk_test_...",
+        "sk_live_...",
+        "rk_test_...",
+        "rk_live_...",
+        "your_key_here",
+        "sk_live_xxxxxxxx",
+        "sk_test_xxxxxxxx",
+        "rk_live_xxxxxxxx",
+        "rk_test_xxxxxxxx",
+    }
 )
 
 
+def _stripe_key() -> str:
+    try:
+        from secrets_bootstrap import bootstrap_secrets, is_placeholder_secret
+
+        bootstrap_secrets()
+        key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if is_placeholder_secret(key):
+            return ""
+        return key
+    except Exception:
+        key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+        if key in _STRIPE_PLACEHOLDERS or key.endswith("xxxxxxxx"):
+            return ""
+        return key
+
+
 def stripe_configured() -> bool:
-    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    key = _stripe_key()
     return bool(key) and key not in _STRIPE_PLACEHOLDERS
 
 
 def stripe_mode() -> str:
     """Return 'live', 'test', 'unknown', or 'off'."""
-    key = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    key = _stripe_key()
     if not key or key in _STRIPE_PLACEHOLDERS:
         return "off"
     if key.startswith("sk_live_") or key.startswith("rk_live_"):
@@ -43,7 +70,7 @@ def create_checkout_session(
     On failure returns None and sets create_checkout_session.last_error.
     """
     create_checkout_session.last_error = ""  # type: ignore[attr-defined]
-    secret = (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+    secret = _stripe_key()
     if not secret:
         create_checkout_session.last_error = "Missing STRIPE_SECRET_KEY"  # type: ignore[attr-defined]
         return None

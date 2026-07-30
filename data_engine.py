@@ -26,13 +26,19 @@ def _headers() -> dict[str, str]:
 
 def has_rentcast_key() -> bool:
     try:
-        from secrets_bootstrap import bootstrap_secrets
+        from secrets_bootstrap import bootstrap_secrets, is_placeholder_secret
 
         bootstrap_secrets()
+        key = (os.getenv("RENTCAST_API_KEY") or "").strip()
+        return bool(key) and not is_placeholder_secret(key)
     except Exception:
-        pass
-    key = (os.getenv("RENTCAST_API_KEY") or "").strip()
-    return bool(key) and key not in {"your_key_here", "your_rentcast_key", ""}
+        key = (os.getenv("RENTCAST_API_KEY") or "").strip()
+        return bool(key) and key not in {
+            "your_key_here",
+            "your_rentcast_key",
+            "paste_rentcast_key",
+            "",
+        }
 
 
 def extract_zip(address: str, fallback: str = "") -> str:

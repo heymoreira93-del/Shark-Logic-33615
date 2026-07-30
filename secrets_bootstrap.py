@@ -51,7 +51,63 @@ SECRET_ALIASES: dict[str, tuple[str, ...]] = {
     "BUYER_EMAILS": ("BUYER_EMAIL", "CASH_BUYER_EMAILS"),
     "STRIPE_SECRET_KEY": ("STRIPE_KEY", "STRIPE_API_KEY"),
     "APP_BASE_URL": ("BASE_URL", "STREAMLIT_APP_URL"),
+    "TWILIO_ACCOUNT_SID": ("TWILIO_SID", "ACCOUNT_SID"),
+    "TWILIO_AUTH_TOKEN": ("TWILIO_TOKEN", "AUTH_TOKEN"),
+    "TWILIO_PHONE_NUMBER": ("TWILIO_FROM", "TWILIO_NUMBER", "FROM_NUMBER"),
+    "RENTCAST_API_KEY": ("RENTCAST_KEY",),
 }
+
+# Template / example values that must NEVER overwrite a real .env key
+_PLACEHOLDER_VALUES = frozenset(
+    {
+        "",
+        "your_key_here",
+        "your_sid",
+        "your_sid_here",
+        "your_token",
+        "your_token_here",
+        "your_rentcast_key",
+        "your_auth_token",
+        "sk_test_...",
+        "sk_live_...",
+        "rk_test_...",
+        "rk_live_...",
+        "your_gmail_app_password",
+        "xxxx_gmail_app_password_xxxx",
+        "sk_live_xxxxxxxx",
+        "+1xxxxxxxxxx",
+        "+1XXXXXXXXXX",
+        "ACxxxxxxxx",
+        "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "you@gmail.com",
+        "deals@yourdomain.com",
+        "buyer1@example.com, buyer2@example.com",
+        "paste_rentcast_key",
+        "paste_twilio_auth_token",
+        "paste_vendor_key",
+        "Your Title Company Escrow",
+        "xxxx",
+        "ABC Title / Escrow",
+    }
+)
+
+
+def is_placeholder_secret(val: str | None) -> bool:
+    """True for empty / template secrets that must not count as configured."""
+    raw = (val or "").strip().strip('"').strip("'")
+    if not raw:
+        return True
+    if raw in _PLACEHOLDER_VALUES:
+        return True
+    if "YOUR_SHEET_ID" in raw:
+        return True
+    if raw.endswith("...") and ("sk_" in raw or "rk_" in raw or raw.startswith("AC")):
+        return True
+    if raw.endswith("xxxxxxxxxx") or raw.endswith("XXXXXXXXXX"):
+        return True
+    if all(c in "xX" for c in raw.replace("AC", "", 1)) and raw.startswith("AC"):
+        return True
+    return False
 
 
 def is_localhost_base_url(url: str | None) -> bool:
@@ -90,6 +146,22 @@ def app_base_url() -> str:
 
 def bootstrap_secrets() -> None:
     """Copy Streamlit Cloud secrets into the environment when present."""
+    # If secrets.toml placeholders clobbered .env, restore real dotenv values first.
+    try:
+        from dotenv import dotenv_values
+
+        for key, val in (dotenv_values() or {}).items():
+            if val is None:
+                continue
+            cleaned = str(val).strip()
+            if not cleaned or is_placeholder_secret(cleaned):
+                continue
+            existing = (os.getenv(key) or "").strip()
+            if (not existing) or is_placeholder_secret(existing):
+                os.environ[key] = cleaned
+    except Exception:
+        pass
+
     try:
         import streamlit as st
 
@@ -97,12 +169,21 @@ def bootstrap_secrets() -> None:
         if secrets is None:
             return
 
-        def _set(key: str, val: object) -> None:
-            if val is not None and str(val).strip():
-                cleaned = str(val).strip().strip('"').strip("'")
-                if key == "APP_BASE_URL":
-                    cleaned = cleaned.rstrip("/")
-                os.environ[key] = cleaned
+        def _set(key: str, val: object, *, overwrite: bool = False) -> None:
+            """Inject secret into os.environ. Never writes placeholders.
+            Prefer keeping a real existing env value over a secrets.toml template.
+            """
+            if val is None:
+                return
+            cleaned = str(val).strip().strip('"').strip("'")
+            if key == "APP_BASE_URL":
+                cleaned = cleaned.rstrip("/")
+            if not cleaned or is_placeholder_secret(cleaned):
+                return
+            existing = (os.getenv(key) or "").strip()
+            if existing and not is_placeholder_secret(existing) and not overwrite:
+                return
+            os.environ[key] = cleaned
 
         for key in SECRET_KEYS:
             try:
@@ -111,9 +192,10 @@ def bootstrap_secrets() -> None:
                 continue
             _set(key, val)
 
-        # Map top-level aliases → canonical names when canonical unset
+        # Map top-level aliases → canonical names when canonical unset / placeholder
         for canonical, aliases in SECRET_ALIASES.items():
-            if os.getenv(canonical):
+            cur = (os.getenv(canonical) or "").strip()
+            if cur and not is_placeholder_secret(cur):
                 continue
             for alt in aliases:
                 try:
@@ -122,13 +204,16 @@ def bootstrap_secrets() -> None:
                     continue
                 if val is not None and str(val).strip():
                     _set(canonical, val)
-                    break
+                    if (os.getenv(canonical) or "").strip() and not is_placeholder_secret(
+                        os.getenv(canonical) or ""
+                    ):
+                        break
 
         # Flatten [connections.gsheets].spreadsheet → GOOGLE_SHEETS_URL when unset
         try:
             gsheets = secrets["connections"]["gsheets"]
             sheet_url = gsheets.get("spreadsheet") if hasattr(gsheets, "get") else gsheets["spreadsheet"]
-            if sheet_url and not os.getenv("GOOGLE_SHEETS_URL"):
+            if sheet_url:
                 _set("GOOGLE_SHEETS_URL", sheet_url)
         except Exception:
             pass
@@ -144,9 +229,11 @@ def bootstrap_secrets() -> None:
                     "phone",
                     "TWILIO_PHONE_NUMBER",
                 ),
+                "TWILIO_AGENT_PHONE": ("agent_phone", "TWILIO_AGENT_PHONE"),
             },
             "stripe": {
-                "STRIPE_SECRET_KEY": ("secret_key", "STRIPE_SECRET_KEY"),
+                "STRIPE_SECRET_KEY": ("secret_key", "STRIPE_SECRET_KEY", "api_key"),
+                "APP_BASE_URL": ("app_base_url", "APP_BASE_URL", "base_url"),
             },
             "email": {
                 "EMAIL_USER": ("user", "EMAIL_USER"),
@@ -161,12 +248,15 @@ def bootstrap_secrets() -> None:
             except Exception:
                 continue
             for env_key, aliases in mapping.items():
-                if os.getenv(env_key):
+                cur = (os.getenv(env_key) or "").strip()
+                if cur and not is_placeholder_secret(cur):
                     continue
                 for alias in aliases:
                     try:
                         _set(env_key, block[alias])
-                        if os.getenv(env_key):
+                        if (os.getenv(env_key) or "").strip() and not is_placeholder_secret(
+                            os.getenv(env_key) or ""
+                        ):
                             break
                     except Exception:
                         continue

@@ -51,12 +51,15 @@ _PLACEHOLDERS = frozenset(
         "+1xxxxxxxxxx",
         "+1XXXXXXXXXX",
         "ACxxxxxxxx",
+        "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         "you@gmail.com",
         "deals@yourdomain.com",
         "buyer1@example.com, buyer2@example.com",
         "paste_rentcast_key",
         "paste_twilio_auth_token",
         "paste_vendor_key",
+        "sk_live_xxxxxxxx",
+        "sk_test_xxxxxxxx",
     }
 )
 
@@ -71,15 +74,36 @@ def _refresh_env_from_streamlit() -> None:
         pass
 
 
+def _is_bad_secret(val: str | None) -> bool:
+    """True for empty / template secrets (never treat as configured)."""
+    raw = (val or "").strip()
+    if not raw or raw in _PLACEHOLDERS:
+        return True
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(raw):
+            return True
+    except Exception:
+        pass
+    if raw.endswith("...") and ("sk_" in raw or "rk_" in raw or "AC" in raw):
+        return True
+    if "xxxxxxxx" in raw.lower() or raw.endswith("XXXXXXXXXX") or raw.endswith("xxxxxxxxxx"):
+        return True
+    if "YOUR_SHEET_ID" in raw:
+        return True
+    return False
+
+
 def _env(key: str) -> str:
-    """Resolve canonical key, then aliases."""
+    """Resolve canonical key, then aliases. Never injects placeholder secrets."""
     _refresh_env_from_streamlit()
     val = (os.getenv(key) or "").strip()
-    if val:
+    if val and not _is_bad_secret(val):
         return val
     for alt in _SECRET_ALIASES.get(key, ()):
         val = (os.getenv(alt) or "").strip()
-        if val:
+        if val and not _is_bad_secret(val):
             os.environ[key] = val
             return val
     # Also peek st.secrets directly (Cloud) if bootstrap missed nested tables
@@ -89,14 +113,24 @@ def _env(key: str) -> str:
         secrets = getattr(st, "secrets", None)
         if secrets is None:
             return ""
+
+        def _accept(raw: object) -> str:
+            if raw is None:
+                return ""
+            cleaned = str(raw).strip().strip('"').strip("'")
+            if not cleaned or _is_bad_secret(cleaned):
+                return ""
+            os.environ[key] = cleaned
+            return cleaned
+
         for alt in (key,) + _SECRET_ALIASES.get(key, ()):
             try:
                 raw = secrets.get(alt) if hasattr(secrets, "get") else secrets[alt]
             except Exception:
                 continue
-            if raw is not None and str(raw).strip():
-                os.environ[key] = str(raw).strip()
-                return str(raw).strip()
+            got = _accept(raw)
+            if got:
+                return got
         # Nested [twilio] / [stripe] / [email] block support
         try:
             nested_sections = {
@@ -132,9 +166,9 @@ def _env(key: str) -> str:
                         raw = block[nested_key]
                     except Exception:
                         continue
-                    if raw is not None and str(raw).strip():
-                        os.environ[key] = str(raw).strip()
-                        return str(raw).strip()
+                    got = _accept(raw)
+                    if got:
+                        return got
         except Exception:
             pass
     except Exception:
@@ -144,14 +178,7 @@ def _env(key: str) -> str:
 
 def _has(key: str) -> bool:
     val = _env(key)
-    if not val:
-        return False
-    if val in _PLACEHOLDERS:
-        return False
-    # Reject obvious placeholder patterns
-    if val.endswith("...") and ("sk_" in val or "rk_" in val or "AC" in val):
-        return False
-    return True
+    return bool(val) and not _is_bad_secret(val)
 
 
 def _missing(keys: list[str]) -> list[str]:

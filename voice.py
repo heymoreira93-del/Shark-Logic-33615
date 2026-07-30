@@ -19,6 +19,15 @@ load_dotenv()
 DEFAULT_VOICE_WEBHOOK = "https://conference-6357-gpuam0.twil.io/conference"
 
 
+def _ensure_secrets() -> None:
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+
+
 def _normalize_e164(phone: str) -> str:
     p = (phone or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
     if p.startswith("++"):
@@ -32,22 +41,32 @@ def _normalize_e164(phone: str) -> str:
 
 
 def _client() -> Client:
+    _ensure_secrets()
     sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
     token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(sid) or is_placeholder_secret(token):
+            raise RuntimeError("Twilio secrets look like placeholders — paste real keys")
+    except ImportError:
+        pass
     if not sid or not token:
         raise RuntimeError("Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN")
     return Client(sid, token)
 
 
 def _from_number() -> str:
+    _ensure_secrets()
     from_phone = _normalize_e164(os.getenv("TWILIO_PHONE_NUMBER", ""))
-    if not from_phone:
+    if not from_phone or _is_placeholder_phone(from_phone):
         raise RuntimeError("Missing TWILIO_PHONE_NUMBER")
     return from_phone
 
 
 def agent_phone() -> str:
     """Your phone — rings first on click-to-call. Prefers TWILIO_AGENT_PHONE, then NOTIFY_PHONE."""
+    _ensure_secrets()
     return _normalize_e164(
         os.getenv("TWILIO_AGENT_PHONE")
         or os.getenv("NOTIFY_PHONE")
@@ -56,28 +75,50 @@ def agent_phone() -> str:
 
 
 def _is_placeholder_phone(phone: str) -> bool:
-    """True for fake/demo numbers (e.g. +1555...) that Twilio will reject."""
-    digits = "".join(c for c in (phone or "") if c.isdigit())
+    """True for fake/demo/template numbers Twilio will reject."""
+    raw = (phone or "").strip()
+    if not raw:
+        return True
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(raw):
+            return True
+    except Exception:
+        pass
+    if "X" in raw.upper() and raw.upper().count("X") >= 4:
+        return True
+    digits = "".join(c for c in raw if c.isdigit())
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
     # NANP 555-01xx is reserved fiction; also catch bare +1555...
-    return len(digits) == 10 and digits.startswith("555")
+    if len(digits) == 10 and digits.startswith("555"):
+        return True
+    # All zeros / obvious templates
+    if digits in {"0000000000", "1111111111", "1234567890"}:
+        return True
+    return False
 
 
 def voice_webhook() -> str:
+    _ensure_secrets()
     return (os.getenv("TWILIO_VOICE_WEBHOOK") or DEFAULT_VOICE_WEBHOOK).strip()
 
 
 def voice_configured() -> bool:
     try:
+        _ensure_secrets()
         you = agent_phone()
-        return bool(
-            (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
-            and (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
-            and _from_number()
-            and you
-            and not _is_placeholder_phone(you)
-        )
+        sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
+        token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+        try:
+            from secrets_bootstrap import is_placeholder_secret
+
+            if is_placeholder_secret(sid) or is_placeholder_secret(token):
+                return False
+        except Exception:
+            pass
+        return bool(sid and token and _from_number() and you and not _is_placeholder_phone(you))
     except Exception:
         return False
 

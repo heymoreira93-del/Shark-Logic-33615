@@ -26,8 +26,20 @@ def _rentcast_headers() -> dict[str, str]:
 
 
 def has_provider() -> bool:
-    key = (os.getenv("RENTCAST_API_KEY") or "").strip()
-    return bool(key) and key not in {"your_key_here", "your_rentcast_key"}
+    try:
+        from secrets_bootstrap import bootstrap_secrets, is_placeholder_secret
+
+        bootstrap_secrets()
+        key = (os.getenv("RENTCAST_API_KEY") or "").strip()
+        return bool(key) and not is_placeholder_secret(key)
+    except Exception:
+        key = (os.getenv("RENTCAST_API_KEY") or "").strip()
+        return bool(key) and key not in {
+            "your_key_here",
+            "your_rentcast_key",
+            "paste_rentcast_key",
+            "",
+        }
 
 
 def _owner_from_prop(prop: dict[str, Any], address: str) -> dict[str, Any]:

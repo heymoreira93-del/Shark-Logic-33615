@@ -15,6 +15,15 @@ from db import create_deal
 load_dotenv()
 
 
+def _ensure_secrets() -> None:
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+
+
 def _normalize_e164(phone: str) -> str:
     """Fix common typos like ++1... and bare 10-digit US numbers."""
     p = (phone or "").strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -29,17 +38,35 @@ def _normalize_e164(phone: str) -> str:
 
 
 def _client() -> Client:
+    _ensure_secrets()
     account_sid = (os.getenv("TWILIO_ACCOUNT_SID") or "").strip()
     auth_token = (os.getenv("TWILIO_AUTH_TOKEN") or "").strip()
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(account_sid) or is_placeholder_secret(auth_token):
+            raise RuntimeError(
+                "Twilio secrets look like placeholders — paste real TWILIO_* keys"
+            )
+    except ImportError:
+        pass
     if not account_sid or not auth_token:
         raise RuntimeError("Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN in .env / secrets")
     return Client(account_sid, auth_token)
 
 
 def _from_number() -> str:
+    _ensure_secrets()
     from_phone = _normalize_e164(os.getenv("TWILIO_PHONE_NUMBER", ""))
     if not from_phone:
         raise RuntimeError("Missing TWILIO_PHONE_NUMBER in .env / secrets")
+    try:
+        from secrets_bootstrap import is_placeholder_secret
+
+        if is_placeholder_secret(from_phone) or from_phone.upper().endswith("XXXXXXXXXX"):
+            raise RuntimeError("TWILIO_PHONE_NUMBER is still a placeholder")
+    except ImportError:
+        pass
     return from_phone
 
 
