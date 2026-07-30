@@ -55,7 +55,12 @@ def create_checkout_session(
     if amount is None:
         amount = int(os.getenv("STRIPE_EMD_CENTS") or "250000")
 
-    base = (os.getenv("APP_BASE_URL") or "http://localhost:8501").rstrip("/")
+    try:
+        from secrets_bootstrap import app_base_url
+
+        base = app_base_url()
+    except Exception:
+        base = (os.getenv("APP_BASE_URL") or "https://realestateshark.streamlit.app").rstrip("/")
     success = success_url or f"{base}/?emd_paid=1"
     cancel = cancel_url or f"{base}/?emd_cancel=1"
 

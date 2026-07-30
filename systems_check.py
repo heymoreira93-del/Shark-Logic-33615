@@ -228,12 +228,27 @@ def stripe_status() -> dict[str, Any]:
     if not base_ok:
         missing.append("APP_BASE_URL")
         notes.append("Missing APP_BASE_URL (no trailing slash)")
+        notes.append(
+            "WARN: empty APP_BASE_URL — outsiders get broken links. "
+            "Set APP_BASE_URL=https://realestateshark.streamlit.app (no trailing slash)"
+        )
     else:
         base = _env("APP_BASE_URL").rstrip("/")
         os.environ["APP_BASE_URL"] = base
         notes.append(f"APP_BASE_URL={base}")
         if _env("APP_BASE_URL") != base:
             notes.append("Trailing slash stripped from APP_BASE_URL")
+        try:
+            from secrets_bootstrap import is_localhost_base_url
+
+            localish = is_localhost_base_url(base)
+        except Exception:
+            localish = "localhost" in base.lower() or "127.0.0.1" in base
+        if localish:
+            notes.append(
+                "WARN: APP_BASE_URL is localhost — Stripe/SMS/email links will not work "
+                "for outsiders. Set APP_BASE_URL=https://realestateshark.streamlit.app"
+            )
     if mode == "test":
         notes.append(
             "TEST MODE (sk_test_/rk_test_) — no real charges. "
@@ -385,7 +400,10 @@ def missing_keys_summary() -> list[str]:
 
 CLOUD_SECRETS_TOML_TEMPLATE = '''# === DealShark Streamlit Cloud Secrets (PLACEHOLDERS ONLY) ===
 # App settings → Secrets → paste → Save → Reboot app
-# Do NOT commit real values. No trailing slash on APP_BASE_URL.
+# Do NOT commit real values.
+
+# REQUIRED — public app URL, NO trailing slash. Never localhost.
+APP_BASE_URL = "https://realestateshark.streamlit.app"
 
 RENTCAST_API_KEY = "paste_rentcast_key"
 
@@ -396,8 +414,6 @@ TWILIO_AGENT_PHONE = "+1XXXXXXXXXX"
 NOTIFY_PHONE = "+1XXXXXXXXXX"
 # Optional War Room click-to-call webhook:
 # TWILIO_VOICE_WEBHOOK = "https://your-twilio-function.twil.io/conference"
-
-APP_BASE_URL = "https://realestateshark.streamlit.app"
 
 # PRODUCTION money: sk_live_... (or rk_live_...). sk_test_ = demo charges only.
 STRIPE_SECRET_KEY = "sk_live_xxxxxxxx"
@@ -464,6 +480,21 @@ def render_systems_check() -> None:
         )
     if stripe and stripe.get("mode") == "live" and not stripe.get("production_ready"):
         st.warning("Stripe live key detected but APP_BASE_URL is missing.")
+
+    base_raw = (_env("APP_BASE_URL") or "").strip()
+    try:
+        from secrets_bootstrap import is_localhost_base_url
+
+        base_local = is_localhost_base_url(base_raw)
+    except Exception:
+        base_local = (not base_raw) or ("localhost" in base_raw.lower())
+    if base_local:
+        st.warning(
+            "APP_BASE_URL is missing or localhost — other people cannot open deal/Stripe links. "
+            "In Cloud Secrets set:\n"
+            'APP_BASE_URL = "https://realestateshark.streamlit.app"\n'
+            "(no trailing slash). Others must open https://realestateshark.streamlit.app — not localhost."
+        )
 
     all_missing = missing_keys_summary()
     if all_missing:
