@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS deals (
     signed_at TEXT DEFAULT '',
     created_at TEXT DEFAULT '',
     notes TEXT DEFAULT '',
-    lead_temp TEXT DEFAULT 'Cold'
+    lead_temp TEXT DEFAULT 'Cold',
+    lead_id INTEGER
 )
 """
 
@@ -42,12 +43,14 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
-    """Migrate older DBs that predate notes / lead_temp."""
+    """Migrate older DBs that predate notes / lead_temp / lead_id."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(deals)").fetchall()}
     if "notes" not in cols:
         conn.execute("ALTER TABLE deals ADD COLUMN notes TEXT DEFAULT ''")
     if "lead_temp" not in cols:
         conn.execute("ALTER TABLE deals ADD COLUMN lead_temp TEXT DEFAULT 'Cold'")
+    if "lead_id" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN lead_id INTEGER")
 
 
 def init_db() -> None:
@@ -69,6 +72,7 @@ def create_deal(
     pdf_path: str = "",
     notes: str = "",
     lead_temp: str = "Cold",
+    lead_id: int | None = None,
 ) -> str:
     """Insert a PENDING deal. Returns short UUID for the signing URL."""
     init_db()
@@ -81,8 +85,8 @@ def create_deal(
             INSERT INTO deals (
                 id, address, price, seller_name, status, signature,
                 seller_phone, buyer_name, emd, closing_date, pdf_path,
-                created_at, notes, lead_temp
-            ) VALUES (?, ?, ?, ?, 'PENDING', '', ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, notes, lead_temp, lead_id
+            ) VALUES (?, ?, ?, ?, 'PENDING', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 deal_id,
@@ -97,6 +101,7 @@ def create_deal(
                 now,
                 notes or "",
                 temp,
+                lead_id,
             ),
         )
         conn.commit()

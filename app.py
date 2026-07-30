@@ -143,6 +143,12 @@ if "deal_id" in query_params:
     if st.button("Accept & Sign Offer", type="primary", use_container_width=True):
         if sig and sig.strip():
             if mark_as_signed(str(deal_id), sig.strip()):
+                try:
+                    from database import set_lead_signed_for_deal
+
+                    set_lead_signed_for_deal(str(deal_id))
+                except Exception:
+                    pass
                 notify_deal_signed(
                     address=deal["address"],
                     price=float(deal["price"]),

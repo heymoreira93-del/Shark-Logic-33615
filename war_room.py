@@ -1,22 +1,28 @@
 """
-Tampa War Room Streamlit panel — portfolio, stats, bulk + single follow-up SMS.
+Tampa War Room Streamlit panel — portfolio, stats, Contract Agent, offer queue, SMS.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
-from comms import send_followup_sms
+from comms import send_followup_sms, send_queued_offer
+from contract_agent import run_contract_agent
 from database import (
     STATUSES,
     get_all_leads,
     get_pending_leads,
+    list_queued_offers,
     mark_contacted,
     pipeline_stats,
     update_lead_phone,
     update_lead_status,
 )
+from phone_enrich import people_data_configured
+from tampa_config import MIN_WHOLESALE_FEE
 from voice import agent_phone, click_to_call, voice_configured
 
 
@@ -26,6 +32,8 @@ def _style_war_room(df: pd.DataFrame):
         flood = bool(row.get("Flood", False))
         if flood or "Flood" in str(row.get("Risk", "")):
             color = "background-color: #5c1a1a; color: #ffb4b4"
+        elif status == "SIGNED":
+            color = "background-color: #0d3b66; color: #b8e1ff"
         elif status == "Offer Sent":
             color = "background-color: #1a3d2a; color: #b6f5c8"
         elif status in {"Hot Lead", "New Lead"}:
@@ -39,9 +47,161 @@ def _style_war_room(df: pd.DataFrame):
     return df.style.apply(row_style, axis=1)
 
 
+def _render_contract_agent(buyer_name: str) -> None:
+    st.subheader("Contract Agent")
+    st.caption(
+        "Hunt → People Data phone → MAO → cash-offer PDF → signing link → "
+        "**queue only**. You review and tap Send. No auto-SMS."
+    )
+
+    people_on = people_data_configured()
+    if not people_on:
+        st.error(
+            "People-Data OFF — set PEOPLE_DATA_API_URL and PEOPLE_DATA_API_KEY "
+            "in `.env` / Streamlit Secrets, then restart. Agent will not invent phones."
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        zip_code = st.text_input("Agent Zip", value="33615", key="ca_zip")
+    with c2:
+        limit = st.number_input("Max leads", 1, 25, 10, 1, key="ca_limit")
+    with c3:
+        fee = st.number_input(
+            "Wholesale fee $",
+            int(MIN_WHOLESALE_FEE),
+            50000,
+            int(MIN_WHOLESALE_FEE),
+            1000,
+            key="ca_fee",
+        )
+    with c4:
+        do_hunt = st.checkbox("Hunt RentCast first", value=True, key="ca_hunt")
+
+    run_disabled = not people_on
+    if st.button(
+        "Run Contract Agent → Queue",
+        type="primary",
+        use_container_width=True,
+        disabled=run_disabled,
+        key="ca_run",
+    ):
+        with st.spinner("Hunting / enriching / generating offers (no SMS)…"):
+            result = run_contract_agent(
+                zip_code=zip_code,
+                limit=int(limit),
+                fee=float(fee),
+                buyer_name=buyer_name,
+                hunt=bool(do_hunt),
+            )
+        st.session_state["ca_last_result"] = result
+        if result.get("ok"):
+            st.success(
+                f"Queued **{result.get('queued', 0)}** offer(s) · "
+                f"enriched {result.get('enriched', 0)} · "
+                f"skipped {result.get('skipped', 0)} · "
+                f"hunted {result.get('hunted', 0)}"
+            )
+        else:
+            st.warning(
+                f"Queued {result.get('queued', 0)} · skipped {result.get('skipped', 0)} · "
+                f"hunted {result.get('hunted', 0)}"
+            )
+        for err in result.get("errors") or []:
+            st.error(err)
+        st.rerun()
+
+    last = st.session_state.get("ca_last_result")
+    if last and last.get("details"):
+        with st.expander("Last agent run details", expanded=False):
+            for d in last["details"]:
+                price = float(d.get("offer_price") or 0)
+                extra = d.get("error") or (f"${price:,.0f}" if price else "")
+                st.caption(
+                    f"#{d.get('lead_id')} · {d.get('status')} · {d.get('address')} · {extra}"
+                )
+
+
+def _render_offer_queue(buyer_name: str) -> None:
+    st.subheader("Offer Queue (human send)")
+    st.caption(
+        "Prepared cash offers with signing links. Tap **Send** to fire Twilio SMS — "
+        "nothing sends until you approve."
+    )
+    queued = list_queued_offers("QUEUED")
+    if not queued:
+        st.info("Queue empty. Run Contract Agent to prepare offers.")
+        return
+
+    confirm_all = st.checkbox(
+        "I confirm Send all queued (explicit SMS to every row below)",
+        value=False,
+        key="ca_confirm_all",
+    )
+    if st.button("Send all queued", disabled=not confirm_all, key="ca_send_all"):
+        ok_n = 0
+        fail_n = 0
+        for row in queued:
+            res = send_queued_offer(int(row["id"]), buyer_name=buyer_name)
+            if res.get("ok"):
+                ok_n += 1
+            else:
+                fail_n += 1
+                st.error(f"#{row['id']} {row.get('address')}: {res.get('error')}")
+        if ok_n:
+            st.success(f"Sent {ok_n} offer SMS · failed {fail_n}")
+            st.rerun()
+        elif fail_n:
+            st.error(f"All {fail_n} sends failed.")
+
+    for row in queued:
+        qid = int(row["id"])
+        address = row.get("address") or ""
+        phone = row.get("phone") or ""
+        price = float(row.get("offer_price") or 0)
+        deal_id = row.get("deal_id") or ""
+        pdf_path = row.get("pdf_path") or ""
+
+        st.markdown(
+            f"**#{qid}** · lead `{row.get('lead_id')}` · `{address}` · "
+            f"**${price:,.0f}** · `{phone}` · deal `{deal_id}`"
+        )
+        st.text_area(
+            "SMS preview",
+            value=row.get("sms_preview") or "",
+            height=100,
+            disabled=True,
+            key=f"ca_prev_{qid}",
+        )
+        b1, b2 = st.columns([1, 3])
+        with b1:
+            if st.button("Send", type="primary", key=f"ca_send_{qid}", use_container_width=True):
+                res = send_queued_offer(qid, buyer_name=buyer_name)
+                if res.get("ok"):
+                    st.success(f"Sent · SID `{res.get('sid')}`")
+                    st.rerun()
+                else:
+                    st.error(res.get("error") or "Send failed")
+        with b2:
+            if pdf_path and Path(pdf_path).exists():
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download PDF",
+                        f,
+                        file_name=Path(pdf_path).name,
+                        mime="application/pdf",
+                        key=f"ca_pdf_{qid}",
+                    )
+            else:
+                st.caption("PDF path missing on disk.")
+        st.markdown("---")
+
+
 def render_war_room(buyer_name: str = "DealShark") -> None:
     st.title("Tampa War Room")
-    st.caption("Every Tampa lead · flood risk · offer status · bulk follow-up. Open at 9 AM.")
+    st.caption(
+        "Contract Agent · offer queue · portfolio · flood risk · bulk follow-up."
+    )
 
     selected_id = st.session_state.get("wr_selected_lead_id")
     if selected_id is not None:
@@ -66,10 +226,15 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
         st.caption(f"Zip heat map: {dens}")
 
     st.markdown("---")
+    _render_contract_agent(buyer_name)
+    st.markdown("---")
+    _render_offer_queue(buyer_name)
+    st.markdown("---")
     st.subheader("Bulk Follow-up Hammer")
     st.caption(
         "Texts every non-Closed/Dead lead that has a phone number. "
-        "Lis Pendens status uses the stop-auction script."
+        "Lis Pendens status uses the stop-auction script. "
+        "This is follow-up only — not cash-offer signing links."
     )
     dry_run = st.checkbox("Dry run (don't send — just preview)", value=True)
     if st.button("Launch Bulk Follow-up", type="primary"):
@@ -81,7 +246,7 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
         elif not with_phone:
             st.warning(
                 f"{len(pending)} pending lead(s) but none have phone numbers. "
-                "Save leads with Twilio Mobile # from the Calculator."
+                "Run Contract Agent (People Data) or paste phones on leads."
             )
         else:
             sent = 0
@@ -123,8 +288,8 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
 
     if not leads:
         st.info(
-            "No leads yet. Calculator → **Save Lead to War Room** "
-            "(or Generate PDF / Fire SMS)."
+            "No leads yet. Run **Contract Agent**, Seller Factory hunt, or "
+            "Calculator → Save Lead to War Room."
         )
         return
 

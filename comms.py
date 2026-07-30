@@ -80,6 +80,27 @@ def signing_url(deal_id: str) -> str:
     return f"{base}/?deal_id={deal_id}"
 
 
+def offer_sms_body(
+    *,
+    address: str,
+    price: float,
+    seller_name: str = "",
+    buyer_name: str = "an investor",
+    deal_id: str | None = None,
+) -> str:
+    """Same SMS text used for queue preview and live send."""
+    seller = (seller_name or "Seller").strip()
+    first = seller.split()[0] if seller else "there"
+    body = (
+        f"Hi {first}, I'm {buyer_name}. "
+        f"I just saw {address} and wanted to see if you'd consider a cash offer? "
+        f"I have a contract ready to go at ${price:,.0f}."
+    )
+    if deal_id:
+        body += f" View and sign the agreement here: {signing_url(deal_id)}"
+    return body
+
+
 def send_offer_sms(
     to_phone: str,
     address: str,
@@ -93,6 +114,7 @@ def send_offer_sms(
     emd: float = 1000.0,
     closing_date: str = "",
     lead_temp: str = "Warm",
+    lead_id: int | None = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """
     Generate a DB deal (if needed), then SMS the seller with the live signing URL.
@@ -116,16 +138,16 @@ def send_offer_sms(
             closing_date=closing_date,
             pdf_path=pdf_path,
             lead_temp=lead_temp,
+            lead_id=lead_id,
         )
 
-    first = seller.split()[0] if seller else "there"
-    body = (
-        f"Hi {first}, I'm {buyer_name}. "
-        f"I just saw {address} and wanted to see if you'd consider a cash offer? "
-        f"I have a contract ready to go at ${price:,.0f}."
+    body = offer_sms_body(
+        address=address,
+        price=price,
+        seller_name=seller,
+        buyer_name=buyer_name,
+        deal_id=deal_id,
     )
-    if deal_id:
-        body += f" View and sign the agreement here: {signing_url(deal_id)}"
 
     try:
         message = _client().messages.create(
@@ -142,6 +164,71 @@ def send_offer_sms(
 
 
 send_offer_sms.last_error = ""  # type: ignore[attr-defined]
+
+
+def send_queued_offer(
+    queue_id: int,
+    *,
+    buyer_name: str = "DealShark",
+) -> dict[str, object]:
+    """
+    Human-approved send: fire SMS for a QUEUED offer_queue row.
+    Does not create a new deal — uses the existing deal_id.
+    """
+    from database import (
+        get_offer_queue_item,
+        mark_contacted,
+        mark_offer_failed,
+        mark_offer_sent,
+    )
+
+    row = get_offer_queue_item(int(queue_id))
+    if not row:
+        return {"ok": False, "error": f"Queue item #{queue_id} not found."}
+    if (row.get("status") or "") != "QUEUED":
+        return {
+            "ok": False,
+            "error": f"Queue item #{queue_id} is {row.get('status')}, not QUEUED.",
+        }
+
+    phone = (row.get("phone") or "").strip()
+    deal_id = (row.get("deal_id") or "").strip()
+    address = row.get("address") or ""
+    price = float(row.get("offer_price") or 0)
+    seller = row.get("seller_name") or ""
+    pdf_path = row.get("pdf_path") or ""
+    lead_id = row.get("lead_id")
+
+    if not phone:
+        mark_offer_failed(int(queue_id), "No phone on queued offer")
+        return {"ok": False, "error": "No phone on queued offer."}
+    if not deal_id:
+        mark_offer_failed(int(queue_id), "Missing deal_id")
+        return {"ok": False, "error": "Queued offer is missing deal_id."}
+
+    sid, _ = send_offer_sms(
+        phone,
+        address,
+        price,
+        deal_id=deal_id,
+        seller_name=seller,
+        buyer_name=buyer_name,
+        create_if_missing=False,
+        pdf_path=pdf_path,
+        lead_id=int(lead_id) if lead_id not in (None, "") else None,
+    )
+    if not sid:
+        err = getattr(send_offer_sms, "last_error", "") or "Twilio send failed"
+        mark_offer_failed(int(queue_id), err)
+        return {"ok": False, "error": err, "deal_id": deal_id}
+
+    mark_offer_sent(int(queue_id))
+    if lead_id not in (None, ""):
+        try:
+            mark_contacted(int(lead_id), status="Offer Sent")
+        except Exception:
+            pass
+    return {"ok": True, "sid": sid, "deal_id": deal_id, "address": address}
 
 def notify_deal_signed(
     *,
