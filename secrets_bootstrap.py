@@ -46,12 +46,53 @@ def bootstrap_secrets() -> None:
         secrets = getattr(st, "secrets", None)
         if secrets is None:
             return
+
+        def _set(key: str, val: object) -> None:
+            if val is not None and str(val).strip():
+                os.environ[key] = str(val).strip().strip('"').strip("'")
+
         for key in SECRET_KEYS:
             try:
                 val = secrets.get(key) if hasattr(secrets, "get") else secrets[key]
             except Exception:
                 continue
-            if val is not None and str(val).strip():
-                os.environ[key] = str(val).strip()
+            _set(key, val)
+
+        # Nested [twilio] / [stripe] / [email] tables (common paste mistake)
+        nested = {
+            "twilio": {
+                "TWILIO_ACCOUNT_SID": ("account_sid", "sid", "TWILIO_ACCOUNT_SID"),
+                "TWILIO_AUTH_TOKEN": ("auth_token", "token", "TWILIO_AUTH_TOKEN"),
+                "TWILIO_PHONE_NUMBER": (
+                    "phone_number",
+                    "from_number",
+                    "phone",
+                    "TWILIO_PHONE_NUMBER",
+                ),
+            },
+            "stripe": {
+                "STRIPE_SECRET_KEY": ("secret_key", "STRIPE_SECRET_KEY"),
+            },
+            "email": {
+                "EMAIL_USER": ("user", "EMAIL_USER"),
+                "EMAIL_PASS": ("pass", "password", "EMAIL_PASS"),
+                "BUYER_EMAILS": ("buyers", "BUYER_EMAILS"),
+            },
+        }
+        for section, mapping in nested.items():
+            try:
+                block = secrets[section]
+            except Exception:
+                continue
+            for env_key, aliases in mapping.items():
+                if os.getenv(env_key):
+                    continue
+                for alias in aliases:
+                    try:
+                        _set(env_key, block[alias])
+                        if os.getenv(env_key):
+                            break
+                    except Exception:
+                        continue
     except Exception:
         pass
