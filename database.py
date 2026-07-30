@@ -20,7 +20,10 @@ STATUSES = (
     "Follow-up Sent",
     "Dead",
     "Closed",
+    "SIGNED",
 )
+
+QUEUE_STATUSES = ("QUEUED", "SENT", "FAILED", "SKIPPED")
 
 
 def _connect() -> sqlite3.Connection:
@@ -47,6 +50,25 @@ def init_db() -> None:
                 seller_phone TEXT DEFAULT '',
                 last_contacted TEXT DEFAULT '',
                 date_added TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS offer_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER,
+                deal_id TEXT DEFAULT '',
+                address TEXT DEFAULT '',
+                phone TEXT DEFAULT '',
+                seller_name TEXT DEFAULT '',
+                offer_price REAL DEFAULT 0,
+                pdf_path TEXT DEFAULT '',
+                sms_preview TEXT DEFAULT '',
+                status TEXT DEFAULT 'QUEUED',
+                error TEXT DEFAULT '',
+                created_at TEXT DEFAULT '',
+                sent_at TEXT DEFAULT ''
             )
             """
         )
@@ -196,8 +218,202 @@ def get_pending_leads() -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT * FROM leads
-            WHERE status NOT IN ('Closed', 'Dead')
+            WHERE status NOT IN ('Closed', 'Dead', 'SIGNED')
             ORDER BY date_added DESC
             """
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_agent_candidate_leads(
+    *,
+    zip_code: str = "",
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """
+    New Leads not already QUEUED/SENT in offer_queue — ready for Contract Agent.
+    """
+    init_db()
+    zip_code = (zip_code or "").strip()[:5]
+    limit = max(1, min(int(limit), 50))
+    with _connect() as conn:
+        if zip_code:
+            rows = conn.execute(
+                """
+                SELECT l.* FROM leads l
+                WHERE l.status = 'New Lead'
+                  AND substr(COALESCE(l.zip_code, ''), 1, 5) = ?
+                  AND l.id NOT IN (
+                    SELECT lead_id FROM offer_queue
+                    WHERE status IN ('QUEUED', 'SENT') AND lead_id IS NOT NULL
+                  )
+                ORDER BY l.date_added DESC
+                LIMIT ?
+                """,
+                (zip_code, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT l.* FROM leads l
+                WHERE l.status = 'New Lead'
+                  AND l.id NOT IN (
+                    SELECT lead_id FROM offer_queue
+                    WHERE status IN ('QUEUED', 'SENT') AND lead_id IS NOT NULL
+                  )
+                ORDER BY l.date_added DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def enqueue_offer(
+    *,
+    lead_id: int | None,
+    deal_id: str,
+    address: str,
+    phone: str,
+    seller_name: str,
+    offer_price: float,
+    pdf_path: str,
+    sms_preview: str,
+    status: str = "QUEUED",
+    error: str = "",
+) -> int:
+    init_db()
+    if status not in QUEUE_STATUSES:
+        status = "QUEUED"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO offer_queue (
+                lead_id, deal_id, address, phone, seller_name, offer_price,
+                pdf_path, sms_preview, status, error, created_at, sent_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                lead_id,
+                deal_id or "",
+                address or "",
+                phone or "",
+                seller_name or "",
+                float(offer_price or 0),
+                pdf_path or "",
+                sms_preview or "",
+                status,
+                error or "",
+                now,
+                now if status == "SENT" else "",
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def get_offer_queue_item(queue_id: int) -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM offer_queue WHERE id = ?", (queue_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_queued_offers(status: str = "QUEUED") -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        if status:
+            rows = conn.execute(
+                """
+                SELECT * FROM offer_queue
+                WHERE status = ?
+                ORDER BY created_at DESC
+                """,
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM offer_queue ORDER BY created_at DESC"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_offer_sent(queue_id: int) -> bool:
+    init_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE offer_queue
+            SET status = 'SENT', sent_at = ?, error = ''
+            WHERE id = ?
+            """,
+            (now, queue_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def mark_offer_failed(queue_id: int, error: str) -> bool:
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE offer_queue
+            SET status = 'FAILED', error = ?
+            WHERE id = ?
+            """,
+            ((error or "").strip(), queue_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def find_offer_by_deal_id(deal_id: str) -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM offer_queue
+            WHERE deal_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            ((deal_id or "").strip(),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_lead_signed_for_deal(deal_id: str) -> bool:
+    """
+    When a deal is signed, flip the linked War Room lead to SIGNED.
+    Looks up lead_id from offer_queue, or from deals.lead_id via db.get_deal.
+    """
+    deal_id = (deal_id or "").strip()
+    if not deal_id:
+        return False
+
+    lead_id: int | None = None
+    queued = find_offer_by_deal_id(deal_id)
+    if queued and queued.get("lead_id") is not None:
+        try:
+            lead_id = int(queued["lead_id"])
+        except (TypeError, ValueError):
+            lead_id = None
+
+    if lead_id is None:
+        try:
+            from db import get_deal
+
+            deal = get_deal(deal_id)
+            if deal and deal.get("lead_id") not in (None, "", 0, "0"):
+                lead_id = int(deal["lead_id"])
+        except Exception:
+            lead_id = None
+
+    if lead_id is None:
+        return False
+    return update_lead_status(lead_id, "SIGNED")
