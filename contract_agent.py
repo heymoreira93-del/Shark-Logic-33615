@@ -57,14 +57,16 @@ def run_contract_agent(
         "errors": [],
         "details": [],
         "zip_code": zip_code,
+        "people_data": people_data_configured(),
     }
 
+    # People Data is optional: without it we only queue leads that already have a phone.
     if not people_data_configured():
         summary["errors"].append(
-            "People-Data OFF — set PEOPLE_DATA_API_URL and PEOPLE_DATA_API_KEY "
-            "before running the Contract Agent."
+            "People-Data OFF — auto phone lookup disabled. "
+            "Paste cells on War Room leads (or set PEOPLE_DATA_API_URL + KEY). "
+            "Agent will still queue offers for leads that already have a phone."
         )
-        return summary
 
     if hunt:
         if not has_rentcast_key():
@@ -132,7 +134,7 @@ def run_contract_agent(
             continue
 
         phone = (lead.get("seller_phone") or "").strip()
-        if not phone:
+        if not phone and people_data_configured():
             enrich = enrich_phone(owner_name=seller_name, address=address)
             phone = (enrich.get("phone") or "").strip()
             if phone:
@@ -157,6 +159,25 @@ def run_contract_agent(
                 detail["error"] = err
                 summary["details"].append(detail)
                 continue
+        elif not phone:
+            err = "No phone — paste cell on this lead (People-Data OFF)"
+            enqueue_offer(
+                lead_id=lead_id,
+                deal_id="",
+                address=address,
+                phone="",
+                seller_name=seller_name,
+                offer_price=float(lead.get("mao") or 0),
+                pdf_path="",
+                sms_preview="",
+                status="SKIPPED",
+                error=err,
+            )
+            summary["skipped"] += 1
+            detail["status"] = "SKIPPED"
+            detail["error"] = err
+            summary["details"].append(detail)
+            continue
         else:
             # Already had a phone — count as enriched for pipeline clarity
             summary["enriched"] += 1
