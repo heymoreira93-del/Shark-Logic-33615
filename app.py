@@ -1026,12 +1026,23 @@ with calc_tab:
                 else:
                     st.session_state.paid = True
 
-                _gen_assignment_pdf(
+                path = _gen_assignment_pdf(
                     emd_paid_via_stripe=bool(st.session_state.paid and gate_on)
                 )
-                st.success("Assignment PDF generated with equitable-interest boilerplate.")
+                if path:
+                    st.success(
+                        "Assignment PDF generated"
+                        + (" for LIVE buyer." if live_buyer else " (DRAFT only).")
+                    )
+                    if live_buyer and (buyer_email or "").strip():
+                        st.info(
+                            f"Next: send that PDF to **{buyer_email.strip()}** for their signature "
+                            "+ EMD. Title stays blocked until seller is SIGNED too."
+                        )
 
                 pay_link = checkout_url or "(wire / unlock after EMD)"
+                if email_ok and not live_buyer:
+                    st.caption("Buyer list blast runs in draft/outreach mode — still not a locked assignee.")
                 if email_ok:
                     ok, msg = alert_buyers(
                         address.strip(),
