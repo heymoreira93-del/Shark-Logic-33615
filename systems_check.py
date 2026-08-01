@@ -486,7 +486,7 @@ NOTIFY_PHONE = "+1XXXXXXXXXX"
 
 # PRODUCTION money: sk_live_... (or rk_live_...). sk_test_ = demo charges only.
 STRIPE_SECRET_KEY = "sk_live_xxxxxxxx"
-STRIPE_EMD_CENTS = "250000"
+STRIPE_EMD_DOLLARS = "2500"
 
 EMAIL_USER = "you@gmail.com"
 EMAIL_PASS = "xxxx_gmail_app_password_xxxx"
