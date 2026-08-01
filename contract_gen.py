@@ -103,6 +103,8 @@ def generate_assignment_pdf(
     closing_date: str = "",
     emd_paid_via_stripe: bool = False,
     emd_paid_at: str = "",
+    stamp_assignor: bool = True,
+    assignor_signatory: str = "",
 ) -> Path:
     """
     Build Assignment of Real Estate Purchase and Sale Agreement PDF.
@@ -197,15 +199,33 @@ def generate_assignment_pdf(
         pdf.ln(3)
 
     pdf.set_font("Helvetica", size=10)
-    pdf.cell(95, 8, "_______________________________", new_x="RIGHT")
-    pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(95, 6, "Assignor Signature", new_x="RIGHT")
-    pdf.cell(0, 6, "Assignee Signature", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(6)
-    pdf.cell(95, 8, "_______________________________", new_x="RIGHT")
-    pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(95, 6, "Date", new_x="RIGHT")
-    pdf.cell(0, 6, "Date / EMD Stripe confirmation", new_x="LMARGIN", new_y="NEXT")
+    signatory = (
+        (assignor_signatory or os.getenv("ASSIGNOR_SIGNATORY") or assignor_name or "")
+        .strip()
+        or assignor_name
+    )
+    if stamp_assignor:
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(95, 8, signatory[:42], new_x="RIGHT")
+        pdf.set_font("Helvetica", size=10)
+        pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(95, 6, "Assignor (e-signed by DealShark)", new_x="RIGHT")
+        pdf.cell(0, 6, "Assignee Signature", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(6)
+        pdf.cell(95, 8, date_str, new_x="RIGHT")
+        pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(95, 6, "Date (assignor)", new_x="RIGHT")
+        pdf.cell(0, 6, "Date / EMD Stripe confirmation", new_x="LMARGIN", new_y="NEXT")
+    else:
+        pdf.cell(95, 8, "_______________________________", new_x="RIGHT")
+        pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(95, 6, "Assignor Signature", new_x="RIGHT")
+        pdf.cell(0, 6, "Assignee Signature", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(6)
+        pdf.cell(95, 8, "_______________________________", new_x="RIGHT")
+        pdf.cell(0, 8, "_______________________________", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(95, 6, "Date", new_x="RIGHT")
+        pdf.cell(0, 6, "Date / EMD Stripe confirmation", new_x="LMARGIN", new_y="NEXT")
 
     wire = _wire_info()
     pdf.ln(10)

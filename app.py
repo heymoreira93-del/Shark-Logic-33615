@@ -16,6 +16,14 @@ bootstrap_secrets()
 
 import crm as _crm
 
+from close_path import (
+    build_title_cover_email,
+    close_checklist,
+    find_signed_deal_for_address,
+    title_company_email,
+    title_mailto_link,
+    write_title_cover_txt,
+)
 from comms import notify_deal_signed, send_offer_sms, signing_url
 from contract_gen import generate_assignment_pdf
 from data_engine import extract_zip, get_tampa_comps, get_tampa_data, has_rentcast_key
@@ -412,10 +420,11 @@ with calc_tab:
         st.session_state.seller_name = seller_name
 
         mobile = st.text_input(
-            "Twilio Mobile #",
+            "Seller cell #",
             value=st.session_state.seller_phone,
-            placeholder="+15551234567",
+            placeholder="+18135551212",
             key="calc_mobile",
+            help="Seller's mobile for the offer SMS (not your Twilio From number).",
         )
         st.session_state.seller_phone = mobile
 
@@ -662,7 +671,7 @@ with calc_tab:
         if not address.strip():
             st.error("Enter a property address.")
         elif not mobile.strip():
-            st.error("Enter Twilio Mobile # (or Skip Trace first).")
+            st.error("Enter Seller cell # (or Skip Trace / paste phone first).")
         else:
             pdf_path = st.session_state.last_pdf_path
             if not pdf_path or not Path(pdf_path).exists():
@@ -784,9 +793,125 @@ with calc_tab:
             emd_amount=float(emd),
             closing_date=closing_date,
             emd_paid_via_stripe=emd_paid_via_stripe,
+            stamp_assignor=True,
         )
         st.session_state.assign_pdf_path = str(path)
         return str(path)
+
+    # --- Path to $10k checklist + title packet ---
+    st.markdown("---")
+    st.subheader("Path to your fee")
+    st.caption(
+        "Software prep + title open. Title is not contacted until you send the packet "
+        "(mailto / email). Assignor side is auto-stamped on new assignment PDFs."
+    )
+    if "title_file_number" not in st.session_state:
+        st.session_state.title_file_number = ""
+    title_file_in = st.text_input(
+        "Title file number (paste when title replies)",
+        value=st.session_state.title_file_number,
+        key="title_file_input",
+        placeholder="e.g. 2026-08421",
+    )
+    st.session_state.title_file_number = title_file_in
+
+    steps = close_checklist(
+        address=address.strip(),
+        assignment_pdf=st.session_state.get("assign_pdf_path") or "",
+        emd_paid=bool(st.session_state.paid) or not gate_on,
+        title_file_number=st.session_state.title_file_number,
+        assignee_name=cash_buyer.strip(),
+    )
+    done_n = sum(1 for s in steps if s["done"])
+    st.progress(done_n / max(len(steps), 1), text=f"{done_n}/{len(steps)} steps ready")
+    for s in steps:
+        mark = "DONE" if s["done"] else "TODO"
+        st.markdown(f"`{mark}` **{s['label']}**  \n*{s['how']}*")
+
+    signed_deal = find_signed_deal_for_address(address.strip()) if address.strip() else None
+    if st.button("Build Title Packet", use_container_width=True, key="build_title_packet"):
+        if not address.strip():
+            st.error("Enter property address first.")
+        else:
+            cover = build_title_cover_email(
+                address=address.strip(),
+                assignor_name=buyer_name.strip() or "DealShark Acquisitions",
+                assignee_name=cash_buyer.strip() or "TBD Cash Buyer",
+                assignment_fee=float(assignment_fee),
+                purchase_price=float(offer_price),
+                closing_date=closing_date,
+                seller_name=seller_name.strip()
+                or (signed_deal or {}).get("seller_name")
+                or "",
+                deal_id=str((signed_deal or {}).get("id") or st.session_state.get("last_deal_id") or ""),
+            )
+            cover_path = write_title_cover_txt(
+                address=address.strip(),
+                subject=cover["subject"],
+                body=cover["body"],
+            )
+            st.session_state.title_cover_path = str(cover_path)
+            st.session_state.title_cover = cover
+            if not st.session_state.get("assign_pdf_path"):
+                _gen_assignment_pdf(
+                    emd_paid_via_stripe=bool(st.session_state.paid and gate_on)
+                )
+            st.success("Title packet ready — download cover + assignment, then open mailto.")
+            st.rerun()
+
+    if st.session_state.get("title_cover"):
+        cover = st.session_state["title_cover"]
+        st.text_area("Title email preview", value=cover["body"], height=220, key="title_body_prev")
+        to_em = title_company_email()
+        mailto = title_mailto_link(cover["subject"], cover["body"], to_em)
+        if to_em:
+            st.markdown(f"[Open email to title ({to_em})]({mailto})")
+        else:
+            st.markdown(f"[Open email to title (set TITLE_COMPANY_EMAIL in .env)]({mailto})")
+            st.caption("Optional: TITLE_COMPANY_EMAIL=escrow@yourtitle.com in `.env`")
+        c_dl1, c_dl2 = st.columns(2)
+        cover_p = Path(st.session_state.get("title_cover_path") or "")
+        with c_dl1:
+            if cover_p.exists():
+                with cover_p.open("rb") as f:
+                    st.download_button(
+                        "Download title cover (.txt)",
+                        f,
+                        file_name=cover_p.name,
+                        mime="text/plain",
+                        key="dl_title_cover",
+                        use_container_width=True,
+                    )
+        with c_dl2:
+            ap = Path(st.session_state.get("assign_pdf_path") or "")
+            if ap.exists():
+                with ap.open("rb") as f:
+                    st.download_button(
+                        "Download assignment PDF",
+                        f,
+                        file_name=ap.name,
+                        mime="application/pdf",
+                        key="dl_title_assign",
+                        use_container_width=True,
+                    )
+        offer_p = Path(st.session_state.get("last_pdf_path") or "")
+        if not offer_p.exists() and signed_deal and signed_deal.get("pdf_path"):
+            offer_p = Path(str(signed_deal.get("pdf_path")))
+        if offer_p.exists():
+            with offer_p.open("rb") as f:
+                st.download_button(
+                    "Download seller purchase agreement PDF",
+                    f,
+                    file_name=offer_p.name,
+                    mime="application/pdf",
+                    key="dl_title_psa",
+                    use_container_width=True,
+                )
+        else:
+            st.caption(
+                "No seller purchase-agreement PDF on file yet — Generate PDF / Fire SMS "
+                "on Calculator so title gets the PSA too."
+            )
 
     if bypass:
         st.session_state.paid = True
@@ -1004,6 +1129,7 @@ with calc_tab:
                     emd_amount=float(emd),
                     closing_date=closing_date,
                     emd_paid_via_stripe=bool(st.session_state.paid),
+                    stamp_assignor=True,
                 )
                 st.session_state.assign_pdf_path = str(path)
                 st.rerun()
