@@ -99,7 +99,7 @@ def generate_assignment_pdf(
     output_dir: Path | None = None,
     include_disbursement: bool = True,
     flood_insurance_required: bool = False,
-    emd_amount: float = 2500.0,
+    emd_amount: float = 20.0,
     closing_date: str = "",
     emd_paid_via_stripe: bool = False,
     emd_paid_at: str = "",

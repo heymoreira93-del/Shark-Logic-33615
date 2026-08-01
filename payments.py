@@ -66,7 +66,7 @@ def create_checkout_session(
 ) -> str | None:
     """
     Create a Stripe Checkout session for non-refundable EMD.
-    Default EMD: $2,500 (250000 cents) or STRIPE_EMD_CENTS env.
+    Default EMD: $20 (2000 cents) or STRIPE_EMD_CENTS env.
     On failure returns None and sets create_checkout_session.last_error.
     """
     create_checkout_session.last_error = ""  # type: ignore[attr-defined]
@@ -80,7 +80,7 @@ def create_checkout_session(
     stripe.api_key = secret
     amount = emd_cents
     if amount is None:
-        amount = int(os.getenv("STRIPE_EMD_CENTS") or "250000")
+        amount = int(os.getenv("STRIPE_EMD_CENTS") or "2000")
 
     try:
         from secrets_bootstrap import app_base_url
@@ -136,4 +136,4 @@ create_checkout_session.last_error = ""  # type: ignore[attr-defined]
 
 
 def emd_amount_dollars() -> float:
-    return int(os.getenv("STRIPE_EMD_CENTS") or "250000") / 100.0
+    return int(os.getenv("STRIPE_EMD_CENTS") or "2000") / 100.0
