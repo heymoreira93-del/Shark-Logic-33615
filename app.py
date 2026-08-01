@@ -33,14 +33,22 @@ from database import save_lead
 from db import (
     LEAD_TEMPS,
     append_note,
+    create_assignment_deal,
     create_deal,
+    find_assignment_deal,
     get_deal,
     init_db,
     list_deals,
     mark_as_signed,
     update_lead_temp,
 )
-from email_blast import alert_buyers, email_configured
+from email_blast import (
+    alert_buyers,
+    email_assignment_to_buyer,
+    email_configured,
+    email_title_packet,
+    smtp_configured,
+)
 from generator import generate_contract
 from hunter import skip_trace
 from payments import create_checkout_session, emd_amount_dollars, stripe_configured, stripe_mode
@@ -116,7 +124,7 @@ def _back_button(key: str, label: str = "← Back") -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Seller View (?deal_id=)
+# Seller / Assignee signing view (?deal_id=)
 # ---------------------------------------------------------------------------
 query_params = st.query_params
 if "deal_id" in query_params:
@@ -125,42 +133,72 @@ if "deal_id" in query_params:
         deal_id = deal_id[0]
     deal = get_deal(str(deal_id))
     _back_button("sign_back_top", "← Back to main")
-    st.header("Real Estate Purchase Agreement")
+    kind = (deal or {}).get("deal_kind") or "purchase"
+    is_assignment = kind == "assignment"
+    st.header(
+        "Assignment of Purchase Agreement"
+        if is_assignment
+        else "Real Estate Purchase Agreement"
+    )
     if not deal:
         st.error("Deal not found.")
         _back_button("sign_back_missing", "← Back to main")
         st.stop()
     st.info(f"Property: {deal['address']}")
-    st.success(f"Offer Amount: ${deal['price']:,.2f}")
-    st.write(f"**Seller on file:** {deal['seller_name']}")
+    if is_assignment:
+        st.success(
+            f"Assignment fee at closing: "
+            f"${float(deal.get('assignment_fee') or 0):,.2f}"
+        )
+        st.write(f"**Assignor:** {deal.get('seller_name') or 'DealShark'}")
+        st.write(f"**Assignee (you):** {deal.get('buyer_name') or '—'}")
+        st.caption(f"Underlying purchase price: ${float(deal.get('price') or 0):,.2f}")
+    else:
+        st.success(f"Offer Amount: ${deal['price']:,.2f}")
+        st.write(f"**Seller on file:** {deal['seller_name']}")
     pdf_path = deal.get("pdf_path") or ""
     if pdf_path and Path(pdf_path).exists():
         with open(pdf_path, "rb") as f:
             st.download_button(
-                "View Offer PDF",
+                "View Assignment PDF" if is_assignment else "View Offer PDF",
                 f,
                 file_name=Path(pdf_path).name,
                 mime="application/pdf",
                 use_container_width=True,
             )
     if deal.get("status") == "SIGNED":
-        st.success(f"Document already signed by **{deal.get('signature') or 'Seller'}**.")
+        who = "Assignee" if is_assignment else "Seller"
+        st.success(f"Document already signed by **{deal.get('signature') or who}**.")
         _back_button("sign_back_already", "← Back to main")
         st.stop()
-    st.write("By typing your name below, you agree to the terms of the purchase agreement.")
-    sig = st.text_input("Type Full Legal Name (Electronic Signature)")
-    if st.button("Accept & Sign Offer", type="primary", use_container_width=True):
+    if is_assignment:
+        st.write(
+            "By typing your name below, you accept the Assignment as Assignee and "
+            "agree to close per its terms (including non-refundable EMD if applicable)."
+        )
+        sig = st.text_input("Type Full Legal Name (Assignee Electronic Signature)")
+        btn = "Accept & Sign Assignment"
+    else:
+        st.write(
+            "By typing your name below, you agree to the terms of the purchase agreement."
+        )
+        sig = st.text_input("Type Full Legal Name (Electronic Signature)")
+        btn = "Accept & Sign Offer"
+    if st.button(btn, type="primary", use_container_width=True):
         if sig and sig.strip():
             if mark_as_signed(str(deal_id), sig.strip()):
-                try:
-                    from database import set_lead_signed_for_deal
+                if not is_assignment:
+                    try:
+                        from database import set_lead_signed_for_deal
 
-                    set_lead_signed_for_deal(str(deal_id))
-                except Exception:
-                    pass
+                        set_lead_signed_for_deal(str(deal_id))
+                    except Exception:
+                        pass
                 notify_deal_signed(
                     address=deal["address"],
-                    price=float(deal["price"]),
+                    price=float(
+                        deal.get("assignment_fee") or deal.get("price") or 0
+                    ),
                     signature_name=sig.strip(),
                     deal_id=str(deal_id),
                 )
@@ -168,8 +206,8 @@ if "deal_id" in query_params:
                     "address": deal["address"],
                     "signature": sig.strip(),
                     "deal_id": str(deal_id),
+                    "kind": kind,
                 }
-                # Exit signing screen → main Calculator / command center
                 _go_to_main_page()
             else:
                 st.error("Could not sign this deal (it may already be signed).")
@@ -839,14 +877,79 @@ with calc_tab:
         )
         st.session_state.assign_pdf_path = str(path)
         st.session_state.assign_pdf_live = bool(live_buyer)
+        if live_buyer:
+            assign_id = create_assignment_deal(
+                address.strip(),
+                purchase_price=float(offer_price),
+                assignment_fee=float(assignment_fee),
+                assignor_name=buyer_name.strip() or "DealShark Acquisitions",
+                assignee_name=cash_buyer.strip(),
+                assignee_email=(buyer_email or "").strip(),
+                pdf_path=str(path),
+                closing_date=closing_date,
+                emd=float(emd),
+            )
+            st.session_state.last_assignment_deal_id = assign_id
+            link = signing_url(assign_id)
+            st.session_state.assignment_sign_url = link
+            st.success(f"Buyer e-sign link ready: {link}")
+            if (buyer_email or "").strip() and smtp_configured():
+                ok_e, msg_e = email_assignment_to_buyer(
+                    buyer_email=buyer_email.strip(),
+                    buyer_name=cash_buyer.strip(),
+                    address=address.strip(),
+                    assignment_fee=float(assignment_fee),
+                    purchase_price=float(offer_price),
+                    signing_link=link,
+                    emd_link=st.session_state.get("checkout_url") or "",
+                    pdf_path=str(path),
+                )
+                if ok_e:
+                    st.success(msg_e)
+                else:
+                    st.warning(f"Could not email buyer automatically: {msg_e}")
+            elif (buyer_email or "").strip() and not smtp_configured():
+                st.warning(
+                    "Buyer email on file but EMAIL_USER/EMAIL_PASS missing — "
+                    "copy the e-sign link and send it yourself."
+                )
         return str(path)
+
+    # --- What's still missing (secrets / human) ---
+    st.markdown("---")
+    st.subheader("Still missing for a live close")
+    miss = []
+    if not smtp_configured():
+        miss.append("EMAIL_USER + EMAIL_PASS (Gmail App Password) — auto-email buyer/title")
+    if not email_configured():
+        miss.append("BUYER_EMAILS — blast list for FINDING buyers (separate from locked assignee)")
+    if stripe_mode() == "live":
+        miss.append(
+            "Stripe Activate must unlock live charges (or use Unlock PDF after wire EMD)"
+        )
+    elif stripe_mode() == "off":
+        miss.append("STRIPE_SECRET_KEY — or use Unlock PDF (wire)")
+    if not title_company_email():
+        miss.append("TITLE_COMPANY_EMAIL — one-click email title packet")
+    if not find_signed_deal_for_address(address.strip() if address else ""):
+        miss.append("Seller must SIGN the cash offer (Fire SMS → Accept & Sign)")
+    if not live_buyer:
+        miss.append("Real cash buyer name + confirm they agreed (not KINGPIN placeholder)")
+    assign_signed = find_assignment_deal(address.strip(), signed_only=True) if address.strip() else None
+    if live_buyer and not assign_signed:
+        miss.append("Buyer must e-sign the assignment link (emailed or copied)")
+    if miss:
+        for m in miss:
+            st.caption(f"— {m}")
+    else:
+        st.success("App-side gates clear — open/confirm title file and close for the fee.")
 
     # --- Path to $10k checklist + title packet ---
     st.markdown("---")
     st.subheader("Path to your fee")
     st.caption(
-        "Software prep + title open. Title is not contacted until you send the packet "
-        "(mailto / email). Assignor side is auto-stamped on new assignment PDFs."
+        "Live path: seller SIGNED → real buyer locked → assignment e-sign → EMD → title packet. "
+        "Assignor is auto-stamped; assignee signs via link."
     )
     if "title_file_number" not in st.session_state:
         st.session_state.title_file_number = ""
@@ -885,6 +988,11 @@ with calc_tab:
                 "Title packet blocked — seller is not SIGNED yet. "
                 "Fire SMS offer and get Accept & Sign first."
             )
+        elif not find_assignment_deal(address.strip(), signed_only=True):
+            st.error(
+                "Title packet blocked — buyer has not e-signed the assignment yet. "
+                "Send them the assignment link and wait for Accept & Sign Assignment."
+            )
         else:
             cover = build_title_cover_email(
                 address=address.strip(),
@@ -922,6 +1030,32 @@ with calc_tab:
         else:
             st.markdown(f"[Open email to title (set TITLE_COMPANY_EMAIL in .env)]({mailto})")
             st.caption("Optional: TITLE_COMPANY_EMAIL=escrow@yourtitle.com in `.env`")
+        if to_em and smtp_configured() and st.button(
+            "Email title packet now (SMTP)",
+            key="email_title_smtp",
+            use_container_width=True,
+        ):
+            atts: list[str] = []
+            for p in (
+                st.session_state.get("title_cover_path"),
+                st.session_state.get("assign_pdf_path"),
+                st.session_state.get("last_pdf_path"),
+                (signed_deal or {}).get("pdf_path"),
+            ):
+                if p and Path(str(p)).exists() and str(p) not in atts:
+                    atts.append(str(p))
+            ok_t, msg_t = email_title_packet(
+                title_email=to_em,
+                subject=cover["subject"],
+                body=cover["body"],
+                attachment_paths=atts,
+            )
+            if ok_t:
+                st.success(msg_t)
+            else:
+                st.error(msg_t)
+        elif to_em and not smtp_configured():
+            st.caption("Set EMAIL_USER/EMAIL_PASS to auto-send the title packet from the app.")
         c_dl1, c_dl2 = st.columns(2)
         cover_p = Path(st.session_state.get("title_cover_path") or "")
         with c_dl1:

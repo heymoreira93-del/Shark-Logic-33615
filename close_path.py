@@ -83,6 +83,12 @@ def close_checklist(
     assign_ok = bool(assign_path and assign_path.exists())
     file_no = (title_file_number or "").strip()
     buyer_ok = is_live_assignee(assignee_name)
+    try:
+        from db import find_assignment_deal
+
+        assign_signed = find_assignment_deal(address, signed_only=True)
+    except Exception:
+        assign_signed = None
 
     return [
         {
@@ -117,6 +123,16 @@ def close_checklist(
             ),
         },
         {
+            "id": "buyer_esign",
+            "label": "Buyer e-signed the assignment",
+            "done": bool(assign_signed),
+            "how": (
+                f"SIGNED by {assign_signed.get('signature')} · `{assign_signed.get('id')}`"
+                if assign_signed
+                else "Email/copy assignment e-sign link (?deal_id=) — buyer Accept & Sign Assignment"
+            ),
+        },
+        {
             "id": "emd",
             "label": "Buyer EMD collected (or wire unlock)",
             "done": bool(emd_paid) and buyer_ok,
@@ -125,8 +141,8 @@ def close_checklist(
         {
             "id": "title_file",
             "label": "Title file opened (file number on record)",
-            "done": bool(file_no) and buyer_ok,
-            "how": "Send Title Packet only after seller SIGNED + real buyer locked",
+            "done": bool(file_no) and buyer_ok and bool(assign_signed),
+            "how": "Send Title Packet only after seller SIGNED + buyer e-signed assignment",
         },
         {
             "id": "fee_at_close",

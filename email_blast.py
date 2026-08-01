@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import smtplib
 from email.message import EmailMessage
+from pathlib import Path
 
 # Canonical env names + Cloud-secret aliases (must match systems_check / bootstrap)
 _EMAIL_ALIASES: dict[str, tuple[str, ...]] = {
@@ -111,10 +112,15 @@ def _buyer_list() -> list[str]:
     return [e.strip() for e in raw.replace(";", ",").split(",") if e.strip()]
 
 
-def email_configured() -> bool:
+def smtp_configured() -> bool:
+    """Gmail/SMTP login ready (does not require BUYER_EMAILS)."""
     user = _env("EMAIL_USER")
     password = _env("EMAIL_PASS")
-    if _is_bad(user) or _is_bad(password):
+    return not _is_bad(user) and not _is_bad(password)
+
+
+def email_configured() -> bool:
+    if not smtp_configured():
         return False
     buyers = _buyer_list()
     if not buyers:
@@ -122,7 +128,105 @@ def email_configured() -> bool:
     # Reject leftover example buyer list
     if all(_is_bad(b) or "example.com" in b for b in buyers):
         return False
-    return bool(user and password and buyers)
+    return True
+
+
+def send_email_with_attachments(
+    *,
+    to_addrs: list[str] | str,
+    subject: str,
+    body: str,
+    attachments: list[str | Path] | None = None,
+) -> tuple[bool, str]:
+    """Send one email via SMTP_SSL; optional file attachments."""
+    user = _env("EMAIL_USER")
+    password = _env("EMAIL_PASS")
+    from_addr = (_env("EMAIL_FROM") or user).strip()
+    if _is_bad(user) or _is_bad(password):
+        return False, "Missing or placeholder EMAIL_USER / EMAIL_PASS"
+
+    if isinstance(to_addrs, str):
+        recipients = [e.strip() for e in to_addrs.replace(";", ",").split(",") if e.strip()]
+    else:
+        recipients = [e.strip() for e in to_addrs if (e or "").strip()]
+    recipients = [e for e in recipients if e and "example.com" not in e]
+    if not recipients:
+        return False, "No recipient email"
+
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(recipients)
+
+    for raw in attachments or []:
+        path = Path(raw)
+        if not path.exists() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        mime = "application/pdf" if path.suffix.lower() == ".pdf" else "text/plain"
+        main, _, sub = mime.partition("/")
+        msg.add_attachment(
+            data,
+            maintype=main,
+            subtype=sub or "octet-stream",
+            filename=path.name,
+        )
+
+    host = (os.getenv("SMTP_HOST") or "smtp.gmail.com").strip()
+    port = int(os.getenv("SMTP_PORT") or "465")
+    try:
+        with smtplib.SMTP_SSL(host, port) as smtp:
+            smtp.login(user, password)
+            smtp.send_message(msg)
+        return True, f"Sent to {', '.join(recipients)}"
+    except Exception as exc:
+        return False, f"Email failed: {exc}"
+
+
+def email_assignment_to_buyer(
+    *,
+    buyer_email: str,
+    buyer_name: str,
+    address: str,
+    assignment_fee: float,
+    purchase_price: float,
+    signing_link: str,
+    emd_link: str = "",
+    pdf_path: str = "",
+) -> tuple[bool, str]:
+    body = (
+        f"Hi {buyer_name},\n\n"
+        f"Assignment package for {address}.\n\n"
+        f"Underlying purchase price: ${purchase_price:,.2f}\n"
+        f"Assignment fee due at closing: ${assignment_fee:,.2f}\n\n"
+        f"Review and e-sign the assignment here:\n{signing_link}\n\n"
+    )
+    if emd_link:
+        body += f"Non-refundable EMD checkout:\n{emd_link}\n\n"
+    body += "Reply if you have questions.\n\nDealShark Acquisitions\n"
+    atts = [pdf_path] if pdf_path else []
+    return send_email_with_attachments(
+        to_addrs=buyer_email,
+        subject=f"Assignment to sign — {address}",
+        body=body,
+        attachments=atts,
+    )
+
+
+def email_title_packet(
+    *,
+    title_email: str,
+    subject: str,
+    body: str,
+    attachment_paths: list[str],
+) -> tuple[bool, str]:
+    return send_email_with_attachments(
+        to_addrs=title_email,
+        subject=subject,
+        body=body,
+        attachments=attachment_paths,
+    )
 
 
 def alert_buyers(
