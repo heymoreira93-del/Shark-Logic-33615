@@ -20,6 +20,7 @@ from close_path import (
     build_title_cover_email,
     close_checklist,
     find_signed_deal_for_address,
+    is_live_assignee,
     title_company_email,
     title_mailto_link,
     write_title_cover_txt,
@@ -755,6 +756,10 @@ with calc_tab:
             "finish Stripe Activate / identity, or use sk_test_ until approved."
         )
 
+    st.warning(
+        "A deal is **not assigned** until a real cash buyer agrees and is named below. "
+        "Old default “KINGPIN PROPERTIES LLC” was only a placeholder — it never contacted anyone."
+    )
     dc1, dc2, dc3 = st.columns(3)
     with dc1:
         assignment_fee = st.number_input(
@@ -766,13 +771,41 @@ with calc_tab:
         )
     with dc2:
         cash_buyer = st.text_input(
-            "Cash Buyer Name",
-            value="KINGPIN PROPERTIES LLC",
+            "Cash buyer legal name (required for live assign)",
+            value=st.session_state.get("cash_buyer") or "",
             key="cash_buyer",
+            placeholder="Exact LLC / buyer entity that agreed",
         )
     with dc3:
         st.metric("Contract / Shark Offer", f"${offer_price:,.0f}")
         st.caption(f"Spread if assigned: **${assignment_fee:,.0f}**")
+
+    buyer_email = st.text_input(
+        "Buyer email (to send assignment)",
+        value=st.session_state.get("buyer_email") or "",
+        key="buyer_email_live",
+        placeholder="buyer@email.com",
+    )
+    buyer_committed = st.checkbox(
+        "I confirm this buyer verbally or in writing agreed to take this assignment",
+        value=bool(st.session_state.get("buyer_committed")),
+        key="buyer_committed",
+    )
+    draft_only = st.checkbox(
+        "Draft only (practice PDF — NOT for title / not a real assignment)",
+        value=False,
+        key="assign_draft_only",
+    )
+    live_buyer = is_live_assignee(cash_buyer) and buyer_committed and not draft_only
+    if is_live_assignee(cash_buyer) and buyer_committed:
+        st.success(f"Live assignee locked for docs: **{cash_buyer.strip()}**")
+    elif draft_only:
+        st.info("Draft mode — PDFs may use a placeholder buyer; do not send to title.")
+    else:
+        st.error(
+            "LIVE ASSIGN BLOCKED — enter the real buyer’s legal name, check that they agreed, "
+            "or use Draft only for practice. VERIFY/title packet stay blocked until then."
+        )
 
     closer_a, closer_b, closer_c = st.columns(3)
     with closer_a:
@@ -782,10 +815,19 @@ with calc_tab:
     with closer_c:
         bypass = st.button("Unlock PDF (dev / wire)", use_container_width=True)
 
-    def _gen_assignment_pdf(*, emd_paid_via_stripe: bool) -> str:
+    def _gen_assignment_pdf(*, emd_paid_via_stripe: bool) -> str | None:
+        if not live_buyer and not draft_only:
+            st.error(
+                "Cannot generate a live assignment without a real committed buyer. "
+                "Name them + check the confirm box, or enable Draft only."
+            )
+            return None
+        assignee = cash_buyer.strip() if is_live_assignee(cash_buyer) else "TBD Cash Buyer"
+        if draft_only and not is_live_assignee(cash_buyer):
+            assignee = "TBD Cash Buyer"
         path = generate_assignment_pdf(
             address.strip(),
-            cash_buyer.strip() or "TBD",
+            assignee,
             float(assignment_fee),
             assignor_name=buyer_name.strip() or "DealShark Acquisitions",
             purchase_price=float(offer_price),
@@ -796,6 +838,7 @@ with calc_tab:
             stamp_assignor=True,
         )
         st.session_state.assign_pdf_path = str(path)
+        st.session_state.assign_pdf_live = bool(live_buyer)
         return str(path)
 
     # --- Path to $10k checklist + title packet ---
@@ -832,11 +875,21 @@ with calc_tab:
     if st.button("Build Title Packet", use_container_width=True, key="build_title_packet"):
         if not address.strip():
             st.error("Enter property address first.")
+        elif not live_buyer:
+            st.error(
+                "Title packet blocked — need a REAL committed buyer (not KINGPIN/TBD placeholder) "
+                "and seller under contract before opening title."
+            )
+        elif not signed_deal:
+            st.error(
+                "Title packet blocked — seller is not SIGNED yet. "
+                "Fire SMS offer and get Accept & Sign first."
+            )
         else:
             cover = build_title_cover_email(
                 address=address.strip(),
                 assignor_name=buyer_name.strip() or "DealShark Acquisitions",
-                assignee_name=cash_buyer.strip() or "TBD Cash Buyer",
+                assignee_name=cash_buyer.strip(),
                 assignment_fee=float(assignment_fee),
                 purchase_price=float(offer_price),
                 closing_date=closing_date,
@@ -852,7 +905,7 @@ with calc_tab:
             )
             st.session_state.title_cover_path = str(cover_path)
             st.session_state.title_cover = cover
-            if not st.session_state.get("assign_pdf_path"):
+            if not st.session_state.get("assign_pdf_path") or not st.session_state.get("assign_pdf_live"):
                 _gen_assignment_pdf(
                     emd_paid_via_stripe=bool(st.session_state.paid and gate_on)
                 )
@@ -914,16 +967,28 @@ with calc_tab:
             )
 
     if bypass:
-        st.session_state.paid = True
-        if not address.strip():
-            st.warning("Unlocked paywall — enter an address, then Generate PDF / VERIFY.")
+        if not live_buyer and not draft_only:
+            st.error("Unlock blocked — lock a real committed buyer first (or Draft only).")
         else:
-            _gen_assignment_pdf(emd_paid_via_stripe=bool(gate_on))
-            st.success("PDF unlocked (wire / dev). Download below.")
+            st.session_state.paid = True
+            if not address.strip():
+                st.warning("Unlocked paywall — enter an address, then Generate PDF / VERIFY.")
+            else:
+                path = _gen_assignment_pdf(emd_paid_via_stripe=bool(gate_on))
+                if path:
+                    st.success(
+                        "PDF unlocked (wire / dev). Download below."
+                        + (" LIVE buyer on face." if live_buyer else " DRAFT only.")
+                    )
 
     if blast:
         if not address.strip():
             st.error("Enter a property address first.")
+        elif not live_buyer and not draft_only:
+            st.error(
+                "VERIFY blocked — not assigned for real yet. "
+                "Get a cash buyer to agree, type their legal name, check the confirm box."
+            )
         else:
             stripe_ok = stripe_status()["ready"]
             email_ok = email_status()["ready"]
@@ -1119,20 +1184,11 @@ with calc_tab:
                 )
         elif paid and address.strip():
             if st.button("Generate PDF now", use_container_width=True):
-                path = generate_assignment_pdf(
-                    address.strip(),
-                    cash_buyer.strip() or "TBD",
-                    float(assignment_fee),
-                    assignor_name=buyer_name.strip() or "DealShark Acquisitions",
-                    purchase_price=float(offer_price),
-                    flood_insurance_required=bool(high_risk_flood or flood_buffer > 0),
-                    emd_amount=float(emd),
-                    closing_date=closing_date,
+                path = _gen_assignment_pdf(
                     emd_paid_via_stripe=bool(st.session_state.paid),
-                    stamp_assignor=True,
                 )
-                st.session_state.assign_pdf_path = str(path)
-                st.rerun()
+                if path:
+                    st.rerun()
 
     vault_df = read_leads()
     if not vault_df.empty:

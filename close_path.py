@@ -22,6 +22,35 @@ def _ensure_secrets() -> None:
         pass
 
 
+# Placeholder / demo assignee names — never treat as a live locked buyer.
+_FAKE_BUYERS = frozenset(
+    {
+        "",
+        "tbd",
+        "tbd cash buyer",
+        "cash buyer",
+        "kingpin",
+        "kingpin properties",
+        "kingpin properties llc",
+        "buyer",
+        "assignee",
+        "test buyer",
+        "demo buyer",
+    }
+)
+
+
+def is_live_assignee(name: str) -> bool:
+    """True only when a real buyer entity was typed (not app defaults/placeholders)."""
+    cleaned = " ".join((name or "").strip().lower().split())
+    if cleaned in _FAKE_BUYERS:
+        return False
+    if "kingpin" in cleaned and "properties" in cleaned:
+        # Legacy default baked into older UI — require explicit override elsewhere.
+        return False
+    return len(cleaned) >= 3
+
+
 def find_signed_deal_for_address(address: str) -> dict[str, Any] | None:
     """Newest SIGNED deal whose address loosely matches."""
     needle = (address or "").strip().lower()
@@ -53,7 +82,7 @@ def close_checklist(
     assign_path = Path(assignment_pdf) if assignment_pdf else None
     assign_ok = bool(assign_path and assign_path.exists())
     file_no = (title_file_number or "").strip()
-    buyer = (assignee_name or "").strip()
+    buyer_ok = is_live_assignee(assignee_name)
 
     return [
         {
@@ -67,32 +96,37 @@ def close_checklist(
             ),
         },
         {
+            "id": "buyer_locked",
+            "label": "Real cash buyer locked (not a placeholder name)",
+            "done": buyer_ok,
+            "how": (
+                f"Assignee: {assignee_name.strip()}"
+                if buyer_ok
+                else "Enter the buyer's legal entity + confirm they agreed — "
+                "KINGPIN/TBD defaults do NOT count"
+            ),
+        },
+        {
             "id": "assignment_pdf",
-            "label": "Assignment PDF generated (DealShark assignor stamped)",
-            "done": assign_ok,
+            "label": "Live assignment PDF (real buyer on the face)",
+            "done": assign_ok and buyer_ok,
             "how": (
                 str(assign_path)
-                if assign_ok
-                else "Command Center → Unlock / VERIFY → Generate assignment PDF"
+                if assign_ok and buyer_ok
+                else "Lock a real buyer, then generate assignment (draft-only blocked for title)"
             ),
         },
         {
             "id": "emd",
             "label": "Buyer EMD collected (or wire unlock)",
-            "done": bool(emd_paid),
-            "how": "Stripe EMD checkout or Unlock PDF (dev / wire)",
-        },
-        {
-            "id": "buyer_named",
-            "label": "Cash buyer / assignee named",
-            "done": bool(buyer) and buyer.upper() not in {"TBD", "TBD CASH BUYER"},
-            "how": "Set Cash Buyer Name (e.g. KINGPIN PROPERTIES LLC)",
+            "done": bool(emd_paid) and buyer_ok,
+            "how": "Buyer pays Stripe EMD / wire after they agree — Unlock PDF only after real commit",
         },
         {
             "id": "title_file",
             "label": "Title file opened (file number on record)",
-            "done": bool(file_no),
-            "how": "Send Title Packet (email/mailto) → paste file number when title replies",
+            "done": bool(file_no) and buyer_ok,
+            "how": "Send Title Packet only after seller SIGNED + real buyer locked",
         },
         {
             "id": "fee_at_close",
