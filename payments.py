@@ -56,6 +56,42 @@ def stripe_mode() -> str:
     return "unknown"
 
 
+def emd_amount_cents() -> int:
+    """
+    Assignment EMD in Stripe cents. Default $2,500.
+
+    Prefers STRIPE_EMD_DOLLARS (e.g. 2500). Also accepts STRIPE_EMD_CENTS.
+    Footgun fix: if someone sets STRIPE_EMD_CENTS=2500 meaning dollars,
+    coerce to 250000 cents (same for other typical dollar EMDs 20–10000).
+    """
+    try:
+        from secrets_bootstrap import bootstrap_secrets
+
+        bootstrap_secrets()
+    except Exception:
+        pass
+
+    dollars_raw = (os.getenv("STRIPE_EMD_DOLLARS") or "").strip()
+    if dollars_raw:
+        try:
+            return max(100, int(round(float(dollars_raw) * 100)))
+        except ValueError:
+            pass
+
+    cents_raw = (os.getenv("STRIPE_EMD_CENTS") or "250000").strip()
+    try:
+        cents = int(round(float(cents_raw)))
+    except ValueError:
+        cents = 250_000
+
+    # Typical user mistake: typed dollars into STRIPE_EMD_CENTS (2500 → $25).
+    # Real cent amounts for assignment EMD are almost always >= 10000 ($100+),
+    # except legacy $20 tests (2000 cents). Treat 20–9999 as dollars.
+    if 20 <= cents <= 9999:
+        cents = cents * 100
+    return max(100, cents)
+
+
 def create_checkout_session(
     *,
     address: str,
@@ -66,7 +102,7 @@ def create_checkout_session(
 ) -> str | None:
     """
     Create a Stripe Checkout session for non-refundable EMD.
-    Default EMD: $2,500 (250000 cents) or STRIPE_EMD_CENTS env.
+    Default EMD: $2,500 (or STRIPE_EMD_DOLLARS / STRIPE_EMD_CENTS).
     On failure returns None and sets create_checkout_session.last_error.
     """
     create_checkout_session.last_error = ""  # type: ignore[attr-defined]
@@ -78,9 +114,7 @@ def create_checkout_session(
     import stripe
 
     stripe.api_key = secret
-    amount = emd_cents
-    if amount is None:
-        amount = int(os.getenv("STRIPE_EMD_CENTS") or "250000")
+    amount = emd_cents if emd_cents is not None else emd_amount_cents()
 
     try:
         from secrets_bootstrap import app_base_url
@@ -136,4 +170,4 @@ create_checkout_session.last_error = ""  # type: ignore[attr-defined]
 
 
 def emd_amount_dollars() -> float:
-    return int(os.getenv("STRIPE_EMD_CENTS") or "250000") / 100.0
+    return emd_amount_cents() / 100.0
