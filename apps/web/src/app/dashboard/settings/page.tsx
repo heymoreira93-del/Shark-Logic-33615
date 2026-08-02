@@ -1,8 +1,9 @@
 import { SettingsClient } from "./settings-client";
-import { requireOrgContext, tenantFrom } from "@/lib/tenant";
+import { requirePageAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 export default async function SettingsPage() {
-  const ctx = await requireOrgContext();
+  const ctx = await requirePageAuth("settings.manage");
   const { data: settings, error } = await tenantFrom(
     ctx.supabase,
     "organization_settings",
@@ -15,7 +16,7 @@ export default async function SettingsPage() {
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Organization settings</h1>
       <p className="text-sm text-teal-900/60">{ctx.organization.name}</p>
-      {error ? <p className="text-red-700">{error.message}</p> : null}
+      {error ? <p className="text-red-700">Unable to load settings</p> : null}
       <SettingsClient
         initialSettings={
           (settings as {
@@ -32,7 +33,7 @@ export default async function SettingsPage() {
             timezone: "America/New_York",
           }
         }
-        canWrite={ctx.permissions.includes("settings.write")}
+        canWrite
       />
     </div>
   );

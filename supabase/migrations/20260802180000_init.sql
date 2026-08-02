@@ -214,41 +214,41 @@ create index if not exists audit_logs_org_idx on public.audit_logs (organization
 -- ---------------------------------------------------------------------------
 
 insert into public.permissions (key, name, description) values
-  ('org.manage', 'Manage organization', 'Update org settings and billing profile'),
-  ('members.manage', 'Manage members', 'Invite, remove, and change member roles'),
-  ('leads.read', 'Read leads', 'View leads'),
-  ('leads.write', 'Write leads', 'Create and update leads'),
-  ('deals.read', 'Read deals', 'View deals'),
-  ('deals.write', 'Write deals', 'Create and update deals'),
-  ('contacts.read', 'Read contacts', 'View contacts'),
-  ('contacts.write', 'Write contacts', 'Create and update contacts'),
-  ('files.read', 'Read files', 'View and download files'),
-  ('files.write', 'Write files', 'Upload and attach files'),
-  ('settings.read', 'Read settings', 'View organization settings'),
-  ('settings.write', 'Write settings', 'Update organization settings'),
-  ('sms.send', 'Send SMS', 'Send offer and follow-up SMS'),
-  ('audit.read', 'Read audit log', 'View audit events')
+  ('leads.view', 'View Leads', 'View leads in the organization'),
+  ('leads.edit', 'Edit Leads', 'Create and update leads'),
+  ('leads.delete', 'Delete Leads', 'Delete leads'),
+  ('deals.view', 'View Deals', 'View deals in the organization'),
+  ('deals.edit', 'Edit Deals', 'Create and update deals'),
+  ('users.manage', 'Manage Users', 'Invite, remove, and change member roles'),
+  ('billing.manage', 'Billing', 'View and manage billing'),
+  ('settings.manage', 'Settings', 'View and update organization settings')
 on conflict (key) do nothing;
 
 insert into public.roles (organization_id, key, name, description, is_system)
 select null, v.key, v.name, v.description, true
 from (
   values
-    ('owner', 'Owner', 'Full access to the organization'),
-    ('admin', 'Admin', 'Manage members, settings, and all deal data'),
-    ('agent', 'Agent', 'Work leads, deals, contacts, and files'),
-    ('viewer', 'Viewer', 'Read-only access')
+    ('owner', 'Owner', 'Full access including billing and user management'),
+    ('admin', 'Admin', 'Full operational access; manage users and settings'),
+    ('manager', 'Manager', 'Manage leads and deals; update settings'),
+    ('employee', 'Employee', 'Work leads and deals'),
+    ('viewer', 'Viewer', 'Read-only access to leads and deals')
 ) as v(key, name, description)
 where not exists (
   select 1 from public.roles r where r.organization_id is null and r.key = v.key
 );
 
--- Attach permissions to system roles
 insert into public.role_permissions (role_id, permission_id, organization_id)
 select r.id, p.id, null
 from public.roles r
 cross join public.permissions p
-where r.organization_id is null and r.key = 'owner'
+where r.organization_id is null
+  and r.key = 'owner'
+  and p.key in (
+    'leads.view', 'leads.edit', 'leads.delete',
+    'deals.view', 'deals.edit',
+    'users.manage', 'billing.manage', 'settings.manage'
+  )
 on conflict do nothing;
 
 insert into public.role_permissions (role_id, permission_id, organization_id)
@@ -257,7 +257,11 @@ from public.roles r
 cross join public.permissions p
 where r.organization_id is null
   and r.key = 'admin'
-  and p.key <> 'org.manage'
+  and p.key in (
+    'leads.view', 'leads.edit', 'leads.delete',
+    'deals.view', 'deals.edit',
+    'users.manage', 'settings.manage'
+  )
 on conflict do nothing;
 
 insert into public.role_permissions (role_id, permission_id, organization_id)
@@ -265,14 +269,21 @@ select r.id, p.id, null
 from public.roles r
 cross join public.permissions p
 where r.organization_id is null
-  and r.key = 'agent'
+  and r.key = 'manager'
   and p.key in (
-    'leads.read', 'leads.write',
-    'deals.read', 'deals.write',
-    'contacts.read', 'contacts.write',
-    'files.read', 'files.write',
-    'settings.read', 'sms.send'
+    'leads.view', 'leads.edit', 'leads.delete',
+    'deals.view', 'deals.edit',
+    'settings.manage'
   )
+on conflict do nothing;
+
+insert into public.role_permissions (role_id, permission_id, organization_id)
+select r.id, p.id, null
+from public.roles r
+cross join public.permissions p
+where r.organization_id is null
+  and r.key = 'employee'
+  and p.key in ('leads.view', 'leads.edit', 'deals.view', 'deals.edit')
 on conflict do nothing;
 
 insert into public.role_permissions (role_id, permission_id, organization_id)
@@ -281,9 +292,7 @@ from public.roles r
 cross join public.permissions p
 where r.organization_id is null
   and r.key = 'viewer'
-  and p.key in (
-    'leads.read', 'deals.read', 'contacts.read', 'files.read', 'settings.read'
-  )
+  and p.key in ('leads.view', 'deals.view')
 on conflict do nothing;
 
 -- ---------------------------------------------------------------------------
@@ -513,20 +522,26 @@ create policy organizations_select_member on public.organizations
 drop policy if exists organizations_update_manage on public.organizations;
 create policy organizations_update_manage on public.organizations
   for update to authenticated
-  using (public.has_org_permission(id, 'org.manage'))
-  with check (public.has_org_permission(id, 'org.manage'));
+  using (public.has_org_permission(id, 'settings.manage'))
+  with check (public.has_org_permission(id, 'settings.manage'));
 
 -- Members
 drop policy if exists organization_members_select on public.organization_members;
 create policy organization_members_select on public.organization_members
   for select to authenticated
-  using (public.is_org_member(organization_id));
+  using (
+    public.is_org_member(organization_id)
+    and (
+      public.has_org_permission(organization_id, 'users.manage')
+      or user_id = auth.uid()
+    )
+  );
 
 drop policy if exists organization_members_manage on public.organization_members;
 create policy organization_members_manage on public.organization_members
   for all to authenticated
-  using (public.has_org_permission(organization_id, 'members.manage'))
-  with check (public.has_org_permission(organization_id, 'members.manage'));
+  using (public.has_org_permission(organization_id, 'users.manage'))
+  with check (public.has_org_permission(organization_id, 'users.manage'));
 
 -- Profiles: user can read/update self; org members can read teammate profiles
 drop policy if exists profiles_select_self_or_teammate on public.profiles;
@@ -552,89 +567,100 @@ create policy profiles_update_self on public.profiles
   using (id = auth.uid())
   with check (id = auth.uid());
 
--- Generic tenant isolation helpers via policies
 drop policy if exists organization_settings_select on public.organization_settings;
-create policy organization_settings_select on public.organization_settings
-  for select to authenticated
-  using (
-    public.is_org_member(organization_id)
-    and public.has_org_permission(organization_id, 'settings.read')
-  );
-
 drop policy if exists organization_settings_write on public.organization_settings;
-create policy organization_settings_write on public.organization_settings
+create policy organization_settings_all on public.organization_settings
   for all to authenticated
-  using (public.has_org_permission(organization_id, 'settings.write'))
-  with check (public.has_org_permission(organization_id, 'settings.write'));
+  using (public.has_org_permission(organization_id, 'settings.manage'))
+  with check (public.has_org_permission(organization_id, 'settings.manage'));
 
 drop policy if exists contacts_select on public.contacts;
 create policy contacts_select on public.contacts
   for select to authenticated
   using (
     public.is_org_member(organization_id)
-    and public.has_org_permission(organization_id, 'contacts.read')
+    and public.has_org_permission(organization_id, 'leads.view')
   );
 
 drop policy if exists contacts_write on public.contacts;
 create policy contacts_write on public.contacts
   for all to authenticated
-  using (public.has_org_permission(organization_id, 'contacts.write'))
-  with check (public.has_org_permission(organization_id, 'contacts.write'));
+  using (public.has_org_permission(organization_id, 'leads.edit'))
+  with check (public.has_org_permission(organization_id, 'leads.edit'));
 
 drop policy if exists leads_select on public.leads;
+drop policy if exists leads_write on public.leads;
 create policy leads_select on public.leads
   for select to authenticated
   using (
     public.is_org_member(organization_id)
-    and public.has_org_permission(organization_id, 'leads.read')
+    and public.has_org_permission(organization_id, 'leads.view')
   );
-
-drop policy if exists leads_write on public.leads;
-create policy leads_write on public.leads
-  for all to authenticated
-  using (public.has_org_permission(organization_id, 'leads.write'))
-  with check (public.has_org_permission(organization_id, 'leads.write'));
+create policy leads_insert on public.leads
+  for insert to authenticated
+  with check (public.has_org_permission(organization_id, 'leads.edit'));
+create policy leads_update on public.leads
+  for update to authenticated
+  using (public.has_org_permission(organization_id, 'leads.edit'))
+  with check (public.has_org_permission(organization_id, 'leads.edit'));
+create policy leads_delete on public.leads
+  for delete to authenticated
+  using (public.has_org_permission(organization_id, 'leads.delete'));
 
 drop policy if exists deals_select on public.deals;
+drop policy if exists deals_write on public.deals;
 create policy deals_select on public.deals
   for select to authenticated
   using (
     public.is_org_member(organization_id)
-    and public.has_org_permission(organization_id, 'deals.read')
+    and public.has_org_permission(organization_id, 'deals.view')
   );
-
-drop policy if exists deals_write on public.deals;
-create policy deals_write on public.deals
-  for all to authenticated
-  using (public.has_org_permission(organization_id, 'deals.write'))
-  with check (public.has_org_permission(organization_id, 'deals.write'));
+create policy deals_insert on public.deals
+  for insert to authenticated
+  with check (public.has_org_permission(organization_id, 'deals.edit'));
+create policy deals_update on public.deals
+  for update to authenticated
+  using (public.has_org_permission(organization_id, 'deals.edit'))
+  with check (public.has_org_permission(organization_id, 'deals.edit'));
+create policy deals_delete on public.deals
+  for delete to authenticated
+  using (public.has_org_permission(organization_id, 'deals.edit'));
 
 drop policy if exists files_select on public.files;
 create policy files_select on public.files
   for select to authenticated
   using (
     public.is_org_member(organization_id)
-    and public.has_org_permission(organization_id, 'files.read')
+    and public.has_org_permission(organization_id, 'deals.view')
   );
 
 drop policy if exists files_write on public.files;
 create policy files_write on public.files
   for all to authenticated
-  using (public.has_org_permission(organization_id, 'files.write'))
-  with check (public.has_org_permission(organization_id, 'files.write'));
+  using (public.has_org_permission(organization_id, 'deals.edit'))
+  with check (public.has_org_permission(organization_id, 'deals.edit'));
 
 drop policy if exists offer_queue_all on public.offer_queue;
 create policy offer_queue_all on public.offer_queue
   for all to authenticated
-  using (public.is_org_member(organization_id))
-  with check (public.is_org_member(organization_id));
+  using (
+    public.is_org_member(organization_id)
+    and public.has_org_permission(organization_id, 'deals.edit')
+  )
+  with check (
+    public.is_org_member(organization_id)
+    and public.has_org_permission(organization_id, 'deals.edit')
+  );
 
 drop policy if exists audit_logs_select on public.audit_logs;
 create policy audit_logs_select on public.audit_logs
   for select to authenticated
   using (
     public.is_org_member(organization_id)
-    and public.has_org_permission(organization_id, 'audit.read')
+    and (
+      public.has_org_permission(organization_id, 'users.manage')
+      or public.has_org_permission(organization_id, 'settings.manage')
+    )
   );
 
 drop policy if exists audit_logs_insert on public.audit_logs;

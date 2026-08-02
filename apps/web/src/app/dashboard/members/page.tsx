@@ -1,8 +1,8 @@
-import { requireOrgContext, tenantFrom } from "@/lib/tenant";
+import { requirePageAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 export default async function MembersPage() {
-  const ctx = await requireOrgContext();
-  const canManage = ctx.permissions.includes("members.manage");
+  const ctx = await requirePageAuth("users.manage");
 
   const { data: members, error } = await tenantFrom(
     ctx.supabase,
@@ -28,12 +28,9 @@ export default async function MembersPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-semibold">Members</h1>
-      <p className="text-sm text-teal-900/60">
-        Users belonging to {ctx.organization.name}
-        {canManage ? "" : " (read-only)"}
-      </p>
-      {error ? <p className="text-red-700">{error.message}</p> : null}
+      <h1 className="text-2xl font-semibold">Manage users</h1>
+      <p className="text-sm text-teal-900/60">Members of {ctx.organization.name}</p>
+      {error ? <p className="text-red-700">Unable to load members</p> : null}
       <div className="card-panel overflow-x-auto rounded-2xl">
         <table className="min-w-full text-left text-sm">
           <thead className="border-b border-teal-900/10 text-teal-900/60">

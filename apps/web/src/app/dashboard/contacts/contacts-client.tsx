@@ -12,7 +12,13 @@ type Contact = {
   created_at: string;
 };
 
-export function ContactsClient({ initialContacts }: { initialContacts: Contact[] }) {
+export function ContactsClient({
+  initialContacts,
+  canEdit = false,
+}: {
+  initialContacts: Contact[];
+  canEdit?: boolean;
+}) {
   const [contacts, setContacts] = useState(initialContacts);
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
@@ -46,6 +52,7 @@ export function ContactsClient({ initialContacts }: { initialContacts: Contact[]
 
   return (
     <div className="space-y-6">
+      {canEdit ? (
       <form onSubmit={onSubmit} className="card-panel grid gap-3 rounded-2xl p-5 md:grid-cols-2">
         <label className="text-sm font-medium">
           Full name
@@ -85,6 +92,7 @@ export function ContactsClient({ initialContacts }: { initialContacts: Contact[]
           </button>
         </div>
       </form>
+      ) : null}
       {msg ? <p className="text-sm text-teal-800">{msg}</p> : null}
       <div className="card-panel overflow-x-auto rounded-2xl">
         <table className="min-w-full text-left text-sm">

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createClient } from "@/lib/supabase/server";
 import { logError, logger } from "@/lib/logger";
-import { assertPermission, getOrgContext, tenantFrom } from "@/lib/tenant";
+import { denyResponse, requireApiAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 const schema = z.object({
   address: z.string().min(3),
@@ -19,12 +19,8 @@ const schema = z.object({
 
 export async function GET() {
   try {
-    const supabase = await createClient();
-    const ctx = await getOrgContext();
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    assertPermission(ctx, "deals.read");
-
-    const { data, error } = await tenantFrom(supabase, "deals", ctx.organizationId)
+    const ctx = await requireApiAuth("deals.view");
+    const { data, error } = await tenantFrom(ctx.supabase, "deals", ctx.organizationId)
       .select(
         "id, address, seller_name, buyer_name, price, status, deal_kind, sign_token, emd_paid, created_at",
       )
@@ -33,27 +29,19 @@ export async function GET() {
 
     if (error) {
       logError(error, { route: "GET /api/deals" });
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to load deals" }, { status: 500 });
     }
     return NextResponse.json({ organizationId: ctx.organizationId, deals: data || [] });
   } catch (err) {
-    const status = (err as { status?: number }).status || 400;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Bad request" },
-      { status },
-    );
+    return denyResponse(err);
   }
 }
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const ctx = await getOrgContext();
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    assertPermission(ctx, "deals.write");
-
+    const ctx = await requireApiAuth("deals.edit");
     const body = schema.parse(await request.json());
-    const { data, error } = await tenantFrom(supabase, "deals", ctx.organizationId)
+    const { data, error } = await tenantFrom(ctx.supabase, "deals", ctx.organizationId)
       .insert({
         lead_id: body.lead_id || null,
         contact_id: body.contact_id || null,
@@ -74,10 +62,10 @@ export async function POST(request: Request) {
 
     if (error) {
       logError(error, { route: "POST /api/deals" });
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to create deal" }, { status: 500 });
     }
 
-    await tenantFrom(supabase, "audit_logs", ctx.organizationId).insert({
+    await tenantFrom(ctx.supabase, "audit_logs", ctx.organizationId).insert({
       actor_user_id: ctx.userId,
       action: "deal.created",
       entity_type: "deal",
@@ -90,11 +78,6 @@ export async function POST(request: Request) {
     );
     return NextResponse.json({ deal: data, organizationId: ctx.organizationId });
   } catch (err) {
-    logError(err, { route: "POST /api/deals" });
-    const status = (err as { status?: number }).status || 400;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Bad request" },
-      { status },
-    );
+    return denyResponse(err);
   }
 }

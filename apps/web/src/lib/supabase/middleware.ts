@@ -1,12 +1,38 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+const PUBLIC_EXACT = new Set(["/"]);
+const PUBLIC_PREFIXES = [
+  "/login",
+  "/signup",
+  "/sign/",
+  "/auth/",
+  "/api/health",
+  "/api/sign",
+  "/api/webhooks/",
+];
+
+function isPublicPath(path: string) {
+  if (PUBLIC_EXACT.has(path)) return true;
+  return PUBLIC_PREFIXES.some((prefix) => path === prefix || path.startsWith(prefix));
+}
+
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !anon) {
+    // Fail closed for protected surfaces when auth backend is misconfigured.
+    const path = request.nextUrl.pathname;
+    if (path.startsWith("/dashboard") || (path.startsWith("/api/") && !isPublicPath(path))) {
+      if (path.startsWith("/api/")) {
+        return NextResponse.json({ error: "Unauthorized", code: "UNAUTHENTICATED" }, { status: 401 });
+      }
+      const redirect = request.nextUrl.clone();
+      redirect.pathname = "/login";
+      return NextResponse.redirect(redirect);
+    }
     return supabaseResponse;
   }
 
@@ -31,13 +57,7 @@ export async function updateSession(request: NextRequest) {
 
   const path = request.nextUrl.pathname;
   const isAuthPage = path.startsWith("/login") || path.startsWith("/signup");
-  const isPublic =
-    path === "/" ||
-    path.startsWith("/sign/") ||
-    path.startsWith("/auth/") ||
-    path.startsWith("/api/health") ||
-    path.startsWith("/api/sign") ||
-    path.startsWith("/api/webhooks/");
+  const isPublic = isPublicPath(path);
 
   if (!user && path.startsWith("/dashboard")) {
     const redirect = request.nextUrl.clone();
@@ -52,8 +72,9 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(redirect);
   }
 
-  if (!user && !isPublic && !isAuthPage && path.startsWith("/api/")) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  // Every non-public API requires a logged-in user. No data payload on deny.
+  if (!user && path.startsWith("/api/") && !isPublic) {
+    return NextResponse.json({ error: "Unauthorized", code: "UNAUTHENTICATED" }, { status: 401 });
   }
 
   return supabaseResponse;

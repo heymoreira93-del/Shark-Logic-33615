@@ -1,8 +1,10 @@
 import { ContactsClient } from "./contacts-client";
-import { requireOrgContext, tenantFrom } from "@/lib/tenant";
+import { requirePageAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 export default async function ContactsPage() {
-  const ctx = await requireOrgContext();
+  const ctx = await requirePageAuth("leads.view");
+  const canEdit = ctx.permissions.includes("leads.edit");
   const { data: contacts, error } = await tenantFrom(
     ctx.supabase,
     "contacts",
@@ -16,7 +18,7 @@ export default async function ContactsPage() {
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Contacts</h1>
       <p className="text-sm text-teal-900/60">Scoped to {ctx.organization.name}</p>
-      {error ? <p className="text-red-700">{error.message}</p> : null}
+      {error ? <p className="text-red-700">Unable to load contacts</p> : null}
       <ContactsClient
         initialContacts={(contacts || []) as Array<{
           id: string;
@@ -27,6 +29,7 @@ export default async function ContactsPage() {
           company_name: string | null;
           created_at: string;
         }>}
+        canEdit={canEdit}
       />
     </div>
   );

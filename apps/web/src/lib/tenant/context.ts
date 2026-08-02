@@ -2,13 +2,12 @@ import { redirect } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { logger } from "@/lib/logger";
-import type {
-  Membership,
-  OrgContext,
-  Organization,
-  OrgRoleKey,
-  PermissionKey,
-} from "./types";
+import {
+  isPermissionKey,
+  type OrgRoleKey,
+  type PermissionKey,
+} from "@/lib/authz/permissions";
+import type { Membership, OrgContext, Organization } from "./types";
 
 export async function getOrgContext(): Promise<OrgContext | null> {
   const supabase = await createClient();
@@ -118,7 +117,7 @@ async function loadPermissions(
   }
   return (permissions || [])
     .map((row) => row.key)
-    .filter((key): key is PermissionKey => Boolean(key));
+    .filter((key): key is PermissionKey => isPermissionKey(key));
 }
 
 export async function requireOrgContext(): Promise<
@@ -137,6 +136,7 @@ export async function requireOrgContext(): Promise<
   return { ...ctx, supabase, user };
 }
 
+/** @deprecated Use requireApiAuth / hasPermission from @/lib/authz */
 export function assertPermission(ctx: OrgContext, permission: PermissionKey) {
   if (!ctx.permissions.includes(permission)) {
     const err = new Error(`Missing permission: ${permission}`);

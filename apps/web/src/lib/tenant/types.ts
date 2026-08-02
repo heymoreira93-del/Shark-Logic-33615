@@ -1,18 +1,6 @@
-export type PermissionKey =
-  | "org.manage"
-  | "members.manage"
-  | "leads.read"
-  | "leads.write"
-  | "deals.read"
-  | "deals.write"
-  | "contacts.read"
-  | "contacts.write"
-  | "files.read"
-  | "files.write"
-  | "settings.read"
-  | "settings.write"
-  | "sms.send"
-  | "audit.read";
+import type { OrgRoleKey, PermissionKey } from "@/lib/authz/permissions";
+
+export type { OrgRoleKey, PermissionKey };
 
 export type TenantTable =
   | "leads"
@@ -23,8 +11,6 @@ export type TenantTable =
   | "offer_queue"
   | "audit_logs"
   | "organization_members";
-
-export type OrgRoleKey = "owner" | "admin" | "agent" | "viewer";
 
 export type Organization = {
   id: string;

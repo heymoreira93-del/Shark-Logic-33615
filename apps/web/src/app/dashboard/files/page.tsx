@@ -1,7 +1,8 @@
-import { requireOrgContext, tenantFrom } from "@/lib/tenant";
+import { requirePageAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 export default async function FilesPage() {
-  const ctx = await requireOrgContext();
+  const ctx = await requirePageAuth("deals.view");
   const { data: files, error } = await tenantFrom(ctx.supabase, "files", ctx.organizationId)
     .select("id, file_name, kind, content_type, byte_size, storage_path, created_at")
     .order("created_at", { ascending: false })
@@ -10,10 +11,8 @@ export default async function FilesPage() {
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Files</h1>
-      <p className="text-sm text-teal-900/60">
-        Scoped to {ctx.organization.name}. Storage paths are prefixed with organization_id.
-      </p>
-      {error ? <p className="text-red-700">{error.message}</p> : null}
+      <p className="text-sm text-teal-900/60">Scoped to {ctx.organization.name}</p>
+      {error ? <p className="text-red-700">Unable to load files</p> : null}
       <div className="card-panel overflow-x-auto rounded-2xl">
         <table className="min-w-full text-left text-sm">
           <thead className="border-b border-teal-900/10 text-teal-900/60">

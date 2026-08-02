@@ -18,9 +18,11 @@ type Deal = {
 export function DealsClient({
   initialDeals,
   appUrl,
+  canEdit = false,
 }: {
   initialDeals: Deal[];
   appUrl: string;
+  canEdit?: boolean;
 }) {
   const [deals, setDeals] = useState(initialDeals);
   const [address, setAddress] = useState("");
@@ -77,6 +79,7 @@ export function DealsClient({
 
   return (
     <div className="space-y-6">
+      {canEdit ? (
       <form onSubmit={createDeal} className="card-panel grid gap-3 rounded-2xl p-5 md:grid-cols-2">
         <label className="text-sm font-medium md:col-span-2">
           Address
@@ -120,6 +123,9 @@ export function DealsClient({
           </button>
         </div>
       </form>
+      ) : (
+        <p className="text-sm text-teal-900/60">View-only — your role cannot create deals.</p>
+      )}
       {msg ? <p className="text-sm text-teal-800">{msg}</p> : null}
       <div className="card-panel overflow-x-auto rounded-2xl">
         <table className="min-w-full text-left text-sm">
@@ -150,9 +156,11 @@ export function DealsClient({
                   >
                     Open sign
                   </a>
-                  <button type="button" className="underline" onClick={() => sendSms(deal)}>
-                    SMS
-                  </button>
+                  {canEdit ? (
+                    <button type="button" className="underline" onClick={() => sendSms(deal)}>
+                      SMS
+                    </button>
+                  ) : null}
                 </td>
               </tr>
             ))}

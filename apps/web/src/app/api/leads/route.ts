@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createClient } from "@/lib/supabase/server";
 import { logError, logger } from "@/lib/logger";
-import { assertPermission, getOrgContext, tenantFrom } from "@/lib/tenant";
+import { denyResponse, requireApiAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 const schema = z.object({
   address: z.string().min(3),
@@ -18,39 +18,27 @@ const schema = z.object({
 
 export async function GET() {
   try {
-    const supabase = await createClient();
-    const ctx = await getOrgContext();
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    assertPermission(ctx, "leads.read");
-
-    const { data, error } = await tenantFrom(supabase, "leads", ctx.organizationId)
+    const ctx = await requireApiAuth("leads.view");
+    const { data, error } = await tenantFrom(ctx.supabase, "leads", ctx.organizationId)
       .select("id, address, seller_name, seller_phone, arv, mao, status, created_at")
       .order("created_at", { ascending: false })
       .limit(100);
 
     if (error) {
       logError(error, { route: "GET /api/leads" });
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to load leads" }, { status: 500 });
     }
     return NextResponse.json({ organizationId: ctx.organizationId, leads: data || [] });
   } catch (err) {
-    const status = (err as { status?: number }).status || 400;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Bad request" },
-      { status },
-    );
+    return denyResponse(err);
   }
 }
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const ctx = await getOrgContext();
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    assertPermission(ctx, "leads.write");
-
+    const ctx = await requireApiAuth("leads.edit");
     const body = schema.parse(await request.json());
-    const { data, error } = await tenantFrom(supabase, "leads", ctx.organizationId)
+    const { data, error } = await tenantFrom(ctx.supabase, "leads", ctx.organizationId)
       .insert({
         address: body.address,
         zip_code: body.zip_code || "",
@@ -68,10 +56,10 @@ export async function POST(request: Request) {
 
     if (error) {
       logError(error, { route: "POST /api/leads" });
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to create lead" }, { status: 500 });
     }
 
-    await tenantFrom(supabase, "audit_logs", ctx.organizationId).insert({
+    await tenantFrom(ctx.supabase, "audit_logs", ctx.organizationId).insert({
       actor_user_id: ctx.userId,
       action: "lead.created",
       entity_type: "lead",
@@ -84,11 +72,34 @@ export async function POST(request: Request) {
     );
     return NextResponse.json({ id: data.id, organizationId: ctx.organizationId });
   } catch (err) {
-    logError(err, { route: "POST /api/leads" });
-    const status = (err as { status?: number }).status || 400;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Bad request" },
-      { status },
-    );
+    return denyResponse(err);
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const ctx = await requireApiAuth("leads.delete");
+    const id = new URL(request.url).searchParams.get("id");
+    if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
+
+    const { error } = await tenantFrom(ctx.supabase, "leads", ctx.organizationId)
+      .delete()
+      .eq("id", id);
+
+    if (error) {
+      logError(error, { route: "DELETE /api/leads" });
+      return NextResponse.json({ error: "Failed to delete lead" }, { status: 500 });
+    }
+
+    await tenantFrom(ctx.supabase, "audit_logs", ctx.organizationId).insert({
+      actor_user_id: ctx.userId,
+      action: "lead.deleted",
+      entity_type: "lead",
+      entity_id: id,
+    });
+
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    return denyResponse(err);
   }
 }

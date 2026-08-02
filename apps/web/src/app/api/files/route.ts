@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { createClient } from "@/lib/supabase/server";
 import { logError, logger } from "@/lib/logger";
-import { assertPermission, getOrgContext, tenantFrom } from "@/lib/tenant";
+import { denyResponse, requireApiAuth } from "@/lib/authz";
+import { tenantFrom } from "@/lib/tenant";
 
 const schema = z.object({
   storage_path: z.string().min(1),
@@ -19,12 +19,8 @@ const schema = z.object({
 
 export async function GET() {
   try {
-    const supabase = await createClient();
-    const ctx = await getOrgContext();
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    assertPermission(ctx, "files.read");
-
-    const { data, error } = await tenantFrom(supabase, "files", ctx.organizationId)
+    const ctx = await requireApiAuth("deals.view");
+    const { data, error } = await tenantFrom(ctx.supabase, "files", ctx.organizationId)
       .select(
         "id, file_name, content_type, byte_size, kind, storage_path, deal_id, lead_id, created_at",
       )
@@ -33,32 +29,23 @@ export async function GET() {
 
     if (error) {
       logError(error, { route: "GET /api/files" });
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to load files" }, { status: 500 });
     }
     return NextResponse.json({ organizationId: ctx.organizationId, files: data || [] });
   } catch (err) {
-    const status = (err as { status?: number }).status || 400;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Bad request" },
-      { status },
-    );
+    return denyResponse(err);
   }
 }
 
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
-    const ctx = await getOrgContext();
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    assertPermission(ctx, "files.write");
-
+    const ctx = await requireApiAuth("deals.edit");
     const body = schema.parse(await request.json());
-    // Force storage paths under the org prefix to avoid cross-tenant object confusion.
     const storagePath = body.storage_path.startsWith(`${ctx.organizationId}/`)
       ? body.storage_path
       : `${ctx.organizationId}/${body.storage_path.replace(/^\/+/, "")}`;
 
-    const { data, error } = await tenantFrom(supabase, "files", ctx.organizationId)
+    const { data, error } = await tenantFrom(ctx.supabase, "files", ctx.organizationId)
       .insert({
         storage_path: storagePath,
         file_name: body.file_name,
@@ -75,7 +62,7 @@ export async function POST(request: Request) {
 
     if (error) {
       logError(error, { route: "POST /api/files" });
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ error: "Failed to register file" }, { status: 500 });
     }
 
     logger.info(
@@ -84,11 +71,6 @@ export async function POST(request: Request) {
     );
     return NextResponse.json({ file: data, organizationId: ctx.organizationId });
   } catch (err) {
-    logError(err, { route: "POST /api/files" });
-    const status = (err as { status?: number }).status || 400;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Bad request" },
-      { status },
-    );
+    return denyResponse(err);
   }
 }

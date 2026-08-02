@@ -27,6 +27,27 @@ Tenant tables (all include `organization_id`):
 
 App queries go through `tenantFrom()` / `requireOrgContext()` so `organization_id` is always applied. Postgres RLS (`is_org_member`, `has_org_permission`) blocks cross-org access even if app code regresses.
 
+## AuthZ (roles + permissions)
+
+Roles: **Owner**, **Admin**, **Manager**, **Employee**, **Viewer**
+
+Permissions:
+
+| Key | Label |
+|---|---|
+| `leads.view` | View Leads |
+| `leads.edit` | Edit Leads |
+| `leads.delete` | Delete Leads |
+| `deals.view` | View Deals |
+| `deals.edit` | Edit Deals |
+| `users.manage` | Manage Users |
+| `billing.manage` | Billing |
+| `settings.manage` | Settings |
+
+- Pages use `requirePageAuth(...)` and redirect to `/dashboard/unauthorized` when denied.
+- APIs use `requireApiAuth(...)` and return `{ error, code }` with **no data** on 401/403.
+- Middleware blocks unauthenticated access to `/dashboard/*` and non-public `/api/*`.
+
 ## Required production env
 
 See `.env.example` and `apps/web/.env.example`. There are **no localhost defaults** in production.
