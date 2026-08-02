@@ -31,7 +31,10 @@ CREATE TABLE IF NOT EXISTS deals (
     created_at TEXT DEFAULT '',
     notes TEXT DEFAULT '',
     lead_temp TEXT DEFAULT 'Cold',
-    lead_id INTEGER
+    lead_id INTEGER,
+    deal_kind TEXT DEFAULT 'purchase',
+    assignment_fee REAL DEFAULT 0,
+    assignee_email TEXT DEFAULT ''
 )
 """
 
@@ -43,7 +46,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def _ensure_columns(conn: sqlite3.Connection) -> None:
-    """Migrate older DBs that predate notes / lead_temp / lead_id."""
+    """Migrate older DBs that predate notes / lead_temp / lead_id / assignment fields."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(deals)").fetchall()}
     if "notes" not in cols:
         conn.execute("ALTER TABLE deals ADD COLUMN notes TEXT DEFAULT ''")
@@ -51,6 +54,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE deals ADD COLUMN lead_temp TEXT DEFAULT 'Cold'")
     if "lead_id" not in cols:
         conn.execute("ALTER TABLE deals ADD COLUMN lead_id INTEGER")
+    if "deal_kind" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN deal_kind TEXT DEFAULT 'purchase'")
+    if "assignment_fee" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN assignment_fee REAL DEFAULT 0")
+    if "assignee_email" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN assignee_email TEXT DEFAULT ''")
 
 
 def init_db() -> None:
@@ -203,3 +212,67 @@ def update_pdf_path(deal_id: str, pdf_path: str) -> None:
     with _connect() as conn:
         conn.execute("UPDATE deals SET pdf_path = ? WHERE id = ?", (pdf_path, deal_id))
         conn.commit()
+
+
+def create_assignment_deal(
+    address: str,
+    *,
+    purchase_price: float,
+    assignment_fee: float,
+    assignor_name: str,
+    assignee_name: str,
+    assignee_email: str = "",
+    pdf_path: str = "",
+    closing_date: str = "",
+    emd: float = 2500.0,
+) -> str:
+    """
+    PENDING assignment for buyer click-to-sign (?deal_id=).
+    buyer_name = assignee; seller_name = assignor.
+    """
+    init_db()
+    deal_id = str(uuid.uuid4())[:8]
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO deals (
+                id, address, price, seller_name, status, signature,
+                seller_phone, buyer_name, emd, closing_date, pdf_path,
+                created_at, notes, lead_temp, lead_id, deal_kind,
+                assignment_fee, assignee_email
+            ) VALUES (?, ?, ?, ?, 'PENDING', '', '', ?, ?, ?, ?, ?, '', 'Hot', NULL,
+                      'assignment', ?, ?)
+            """,
+            (
+                deal_id,
+                address,
+                float(purchase_price),
+                assignor_name,
+                assignee_name,
+                float(emd),
+                closing_date,
+                pdf_path,
+                now,
+                float(assignment_fee),
+                (assignee_email or "").strip(),
+            ),
+        )
+        conn.commit()
+    return deal_id
+
+
+def find_assignment_deal(address: str, *, signed_only: bool = False) -> dict[str, Any] | None:
+    needle = (address or "").strip().lower()
+    if not needle:
+        return None
+    street = needle.split(",")[0].strip()
+    for deal in list_deals(limit=200):
+        if (deal.get("deal_kind") or "purchase") != "assignment":
+            continue
+        if signed_only and (deal.get("status") or "") != "SIGNED":
+            continue
+        hay = (deal.get("address") or "").strip().lower()
+        if needle in hay or (street and street in hay):
+            return deal
+    return None

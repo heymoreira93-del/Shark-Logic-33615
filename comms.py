@@ -230,6 +230,32 @@ def send_queued_offer(
             pass
     return {"ok": True, "sid": sid, "deal_id": deal_id, "address": address}
 
+def notify_phone() -> str:
+    """Your cell for DEAL SIGNED alerts — NOTIFY_PHONE, else TWILIO_AGENT_PHONE."""
+    _ensure_secrets()
+    for key in ("NOTIFY_PHONE", "TWILIO_AGENT_PHONE"):
+        raw = _normalize_e164(os.getenv(key, ""))
+        if not raw:
+            continue
+        try:
+            from secrets_bootstrap import is_placeholder_secret
+
+            if is_placeholder_secret(raw):
+                continue
+        except Exception:
+            pass
+        # Block obvious placeholders like +1555...
+        digits = "".join(c for c in raw if c.isdigit())
+        if digits.startswith("1555") or raw.startswith("+1555"):
+            continue
+        return raw
+    return ""
+
+
+def sign_alerts_configured() -> bool:
+    return bool(notify_phone())
+
+
 def notify_deal_signed(
     *,
     address: str,
@@ -237,9 +263,14 @@ def notify_deal_signed(
     signature_name: str,
     deal_id: str,
 ) -> Optional[str]:
-    """Alert your phone when a seller click-signs."""
-    notify_to = _normalize_e164(os.getenv("NOTIFY_PHONE", ""))
+    """Alert your phone when a seller or assignee click-signs."""
+    _ensure_secrets()
+    notify_to = notify_phone()
     if not notify_to:
+        print("Sign alert skipped — set NOTIFY_PHONE or TWILIO_AGENT_PHONE")
+        notify_deal_signed.last_error = (  # type: ignore[attr-defined]
+            "Missing NOTIFY_PHONE / TWILIO_AGENT_PHONE"
+        )
         return None
     body = (
         f"DEAL SIGNED - {address} @ ${price:,.0f}. "
@@ -251,10 +282,15 @@ def notify_deal_signed(
             from_=_from_number(),
             to=notify_to,
         )
+        notify_deal_signed.last_error = ""  # type: ignore[attr-defined]
         return message.sid
     except Exception as exc:
         print(f"Error notifying signed deal: {exc}")
+        notify_deal_signed.last_error = str(exc)  # type: ignore[attr-defined]
         return None
+
+
+notify_deal_signed.last_error = ""  # type: ignore[attr-defined]
 
 
 def send_followup_sms(

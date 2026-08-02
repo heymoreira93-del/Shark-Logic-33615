@@ -50,15 +50,19 @@ def _style_war_room(df: pd.DataFrame):
 def _render_contract_agent(buyer_name: str) -> None:
     st.subheader("Contract Agent")
     st.caption(
-        "Hunt → People Data phone → MAO → cash-offer PDF → signing link → "
+        "Hunt → phone (paste or People Data) → MAO → cash-offer PDF → signing link → "
         "**queue only**. You review and tap Send. No auto-SMS."
     )
 
     people_on = people_data_configured()
-    if not people_on:
-        st.error(
-            "People-Data OFF — set PEOPLE_DATA_API_URL and PEOPLE_DATA_API_KEY "
-            "in `.env` / Streamlit Secrets, then restart. Agent will not invent phones."
+    if people_on:
+        st.success("People-Data ON — agent can auto-lookup phones.")
+    else:
+        st.warning(
+            "People-Data OFF — no vendor URL/key needed to run. "
+            "**Paste phones** on War Room leads, then run the agent "
+            "(only leads with a phone get queued). "
+            "Optional later: PEOPLE_DATA_API_URL + PEOPLE_DATA_API_KEY in `.env`."
         )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -78,12 +82,10 @@ def _render_contract_agent(buyer_name: str) -> None:
     with c4:
         do_hunt = st.checkbox("Hunt RentCast first", value=True, key="ca_hunt")
 
-    run_disabled = not people_on
     if st.button(
         "Run Contract Agent → Queue",
         type="primary",
         use_container_width=True,
-        disabled=run_disabled,
         key="ca_run",
     ):
         with st.spinner("Hunting / enriching / generating offers (no SMS)…"):
