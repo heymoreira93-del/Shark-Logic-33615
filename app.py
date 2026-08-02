@@ -432,6 +432,8 @@ with calc_tab:
         if do_trace:
             if not address.strip():
                 st.error("Enter an address first.")
+            elif phone_in_addr:
+                st.error(phone_in_addr)
             else:
                 hit = skip_trace(address.strip())
                 if hit:
