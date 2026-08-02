@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Public production app — used when Cloud would otherwise emit localhost links.
-PUBLIC_APP_BASE_URL = "https://realestateshark.streamlit.app"
+# Legacy Streamlit only: set APP_BASE_URL explicitly. No hardcoded product URL.
+# SaaS production uses apps/web + Vercel (NEXT_PUBLIC_APP_URL).
 
 SECRET_KEYS = (
     "RENTCAST_API_KEY",
@@ -141,13 +141,17 @@ def running_on_streamlit_cloud() -> bool:
 def app_base_url() -> str:
     """
     Base URL for Stripe returns, SMS, and email links (no trailing slash).
-    Prefer APP_BASE_URL; on Streamlit Cloud never emit localhost.
+    Requires APP_BASE_URL in any hosted/production environment — no hardcoded defaults.
     """
-    raw = (os.getenv("APP_BASE_URL") or "").strip().rstrip("/")
+    raw = (os.getenv("APP_BASE_URL") or os.getenv("NEXT_PUBLIC_APP_URL") or "").strip().rstrip("/")
     if raw and not is_localhost_base_url(raw):
         return raw
-    if running_on_streamlit_cloud():
-        return PUBLIC_APP_BASE_URL
+    if running_on_streamlit_cloud() or (os.getenv("NODE_ENV") or "").lower() == "production":
+        raise RuntimeError(
+            "APP_BASE_URL (or NEXT_PUBLIC_APP_URL) must be set to your public HTTPS URL. "
+            "Localhost defaults are disabled in hosted/production mode."
+        )
+    # Legacy local Streamlit only
     return raw or "http://localhost:8501"
 
 

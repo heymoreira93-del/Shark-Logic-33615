@@ -1,4 +1,9 @@
 .env
+.env.local
+.env.*.local
+apps/web/.env.local
+apps/web/.env*.local
+
 deals.db
 tampa_leads.db
 crm.db
@@ -7,3 +12,15 @@ __pycache__/
 .streamlit/secrets.toml
 contracts/*.pdf
 !contracts/.gitkeep
+contracts/*.txt
+
+node_modules/
+apps/web/node_modules/
+apps/web/.next/
+apps/web/out/
+.vercel/
+.supabase/
+dist/
+coverage/
+*.log
+.DS_Store

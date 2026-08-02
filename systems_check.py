@@ -276,7 +276,7 @@ def stripe_status() -> dict[str, Any]:
         notes.append("Missing APP_BASE_URL (no trailing slash)")
         notes.append(
             "WARN: empty APP_BASE_URL — outsiders get broken links. "
-            "Set APP_BASE_URL=https://realestateshark.streamlit.app (no trailing slash)"
+            "Set APP_BASE_URL to your public HTTPS app URL (no trailing slash)"
         )
     else:
         base = _env("APP_BASE_URL").rstrip("/")
@@ -293,7 +293,7 @@ def stripe_status() -> dict[str, Any]:
         if localish:
             notes.append(
                 "WARN: APP_BASE_URL is localhost — Stripe/SMS/email links will not work "
-                "for outsiders. Set APP_BASE_URL=https://realestateshark.streamlit.app"
+                "for outsiders. Set APP_BASE_URL to your Vercel/production HTTPS URL"
             )
     if mode == "test":
         notes.append(
@@ -472,7 +472,8 @@ CLOUD_SECRETS_TOML_TEMPLATE = '''# === DealShark Streamlit Cloud Secrets (PLACEH
 # Do NOT commit real values.
 
 # REQUIRED — public app URL, NO trailing slash. Never localhost.
-APP_BASE_URL = "https://realestateshark.streamlit.app"
+# Prefer the Vercel SaaS URL once migrated (apps/web).
+APP_BASE_URL = "https://YOUR_VERCEL_DOMAIN"
 
 RENTCAST_API_KEY = "paste_rentcast_key"
 
@@ -560,9 +561,7 @@ def render_systems_check() -> None:
     if base_local:
         st.warning(
             "APP_BASE_URL is missing or localhost — other people cannot open deal/Stripe links. "
-            "In Cloud Secrets set:\n"
-            'APP_BASE_URL = "https://realestateshark.streamlit.app"\n'
-            "(no trailing slash). Others must open https://realestateshark.streamlit.app — not localhost."
+            "Set APP_BASE_URL to your public HTTPS Vercel URL (no trailing slash)."
         )
 
     all_missing = missing_keys_summary()
