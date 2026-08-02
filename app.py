@@ -206,7 +206,7 @@ if "deal_id" in query_params:
                         set_lead_signed_for_deal(str(deal_id))
                     except Exception:
                         pass
-                notify_deal_signed(
+                sid = notify_deal_signed(
                     address=deal["address"],
                     price=float(
                         deal.get("assignment_fee") or deal.get("price") or 0
@@ -219,6 +219,8 @@ if "deal_id" in query_params:
                     "signature": sig.strip(),
                     "deal_id": str(deal_id),
                     "kind": kind,
+                    "alert_sid": sid or "",
+                    "alert_error": getattr(notify_deal_signed, "last_error", "") or "",
                 }
                 _go_to_main_page()
             else:
@@ -256,10 +258,18 @@ st.caption("Live RentCast · Flood Guard · War Room · Bulk SMS. Built for the 
 _flash = st.session_state.pop("flash_signed", None)
 if _flash:
     st.balloons()
+    kind = _flash.get("kind") or "purchase"
+    label = "Assignment" if kind == "assignment" else "Purchase agreement"
     st.success(
-        f"Purchase agreement signed by **{_flash.get('signature') or 'Seller'}** "
-        f"for {_flash.get('address') or 'the property'}. Escrow outreach next."
+        f"{label} signed by **{_flash.get('signature') or 'Party'}** "
+        f"for {_flash.get('address') or 'the property'}."
     )
+    if sign_alerts_configured():
+        st.info(f"Sign alert SMS targeted to `{notify_phone()}`.")
+    else:
+        st.warning(
+            "No NOTIFY_PHONE set — add your cell in the sidebar so the next signature texts you."
+        )
 
 # Sidebar (shared)
 st.sidebar.header("Tampa Strategy")
