@@ -27,7 +27,13 @@ from close_path import (
 )
 from comms import notify_deal_signed, send_offer_sms, signing_url
 from contract_gen import generate_assignment_pdf
-from data_engine import extract_zip, get_tampa_comps, get_tampa_data, has_rentcast_key
+from data_engine import (
+    address_or_phone_error,
+    extract_zip,
+    get_tampa_comps,
+    get_tampa_data,
+    has_rentcast_key,
+)
 from database import init_db as init_tampa_db
 from database import save_lead
 from db import (
@@ -378,9 +384,13 @@ with calc_tab:
         st.caption("Address → Live Data → Skip Trace")
         address = st.text_input(
             "Property Address",
-            placeholder="815 E Lake Ave, Tampa, FL 33603",
+            placeholder="8310 Regina Pl, Tampa, FL 33615",
             key="calc_address",
+            help="House street address — not the seller's phone. Phone goes in Seller cell #.",
         )
+        phone_in_addr = address_or_phone_error(address.strip()) if address.strip() else ""
+        if phone_in_addr:
+            st.error(phone_in_addr)
 
         b1, b2 = st.columns(2)
         with b1:
@@ -391,6 +401,8 @@ with calc_tab:
         if pull_live:
             if not address.strip():
                 st.error("Enter a Tampa address first.")
+            elif phone_in_addr:
+                st.error(phone_in_addr)
             else:
                 with st.spinner("Hitting RentCast / comps..."):
                     bundle = get_tampa_data(address.strip())

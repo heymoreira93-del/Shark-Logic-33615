@@ -48,6 +48,33 @@ def extract_zip(address: str, fallback: str = "") -> str:
     return fallback
 
 
+def looks_like_phone(value: str) -> bool:
+    """True when the field is a phone (e.g. (813) 334-2567), not a street address."""
+    raw = (value or "").strip()
+    if not raw:
+        return False
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) not in (10, 11):
+        return False
+    if len(digits) == 11 and not digits.startswith("1"):
+        return False
+    # Street addresses usually have a street name letter run; phones are mostly digits/punct.
+    letters = re.sub(r"[^A-Za-z]", "", raw)
+    if len(letters) >= 3:
+        return False
+    return True
+
+
+def address_or_phone_error(value: str) -> str:
+    if looks_like_phone(value):
+        return (
+            "That looks like a phone number, not a property address. "
+            "Put the house address in Property Address "
+            "(e.g. 8310 Regina Pl, Tampa, FL 33615) and the cell in Seller cell #."
+        )
+    return ""
+
+
 def geocode_address(address: str) -> dict[str, float] | None:
     """Optional Google Geocoding for lat/lng accuracy."""
     key = (os.getenv("GOOGLE_MAPS_API_KEY") or "").strip()
@@ -125,6 +152,10 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
     address = (address or "").strip()
     zip_code = zip_code or extract_zip(address)
     get_tampa_comps.last_error = ""  # type: ignore[attr-defined]
+    bad = address_or_phone_error(address)
+    if bad:
+        get_tampa_comps.last_error = bad  # type: ignore[attr-defined]
+        return []
     if not has_rentcast_key():
         return _mock_comps(address)
 
@@ -213,6 +244,9 @@ def get_tampa_data(address: str) -> dict[str, Any]:
     address = (address or "").strip()
     if not address:
         return {"error": "Enter an address."}
+    bad = address_or_phone_error(address)
+    if bad:
+        return {"error": bad}
 
     prop = get_property_data(address)
     if not prop:
