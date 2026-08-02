@@ -119,12 +119,9 @@ def create_checkout_session(
     stripe.api_key = secret
     amount = emd_cents if emd_cents is not None else emd_amount_cents()
 
-    try:
-        from secrets_bootstrap import app_base_url
+    from secrets_bootstrap import app_base_url
 
-        base = app_base_url()
-    except Exception:
-        base = (os.getenv("APP_BASE_URL") or "https://realestateshark.streamlit.app").rstrip("/")
+    base = app_base_url()
     success = success_url or f"{base}/?emd_paid=1"
     cancel = cancel_url or f"{base}/?emd_cancel=1"
 

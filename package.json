@@ -1,0 +1,16 @@
+{
+  "name": "dealshark-saas",
+  "private": true,
+  "version": "1.0.0",
+  "description": "DealShark production SaaS (Vercel + Supabase)",
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "start": "npm --prefix apps/web run start",
+    "lint": "npm --prefix apps/web run lint",
+    "health": "curl -sS ${NEXT_PUBLIC_APP_URL:-http://127.0.0.1:3000}/api/health | python3 -m json.tool"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

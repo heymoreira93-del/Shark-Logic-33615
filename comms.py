@@ -71,12 +71,9 @@ def _from_number() -> str:
 
 
 def signing_url(deal_id: str) -> str:
-    try:
-        from secrets_bootstrap import app_base_url
+    from secrets_bootstrap import app_base_url
 
-        base = app_base_url()
-    except Exception:
-        base = (os.getenv("APP_BASE_URL") or "https://realestateshark.streamlit.app").rstrip("/")
+    base = app_base_url()
     return f"{base}/?deal_id={deal_id}"
 
 
