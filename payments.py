@@ -84,10 +84,13 @@ def emd_amount_cents() -> int:
     except ValueError:
         cents = 250_000
 
+    # Legacy $20 EMD (2000 cents) — bump to the live $2,500 default.
+    if cents in (20, 2000):
+        return 250_000
+
     # Typical user mistake: typed dollars into STRIPE_EMD_CENTS (2500 → $25).
-    # Real cent amounts for assignment EMD are almost always >= 10000 ($100+),
-    # except legacy $20 tests (2000 cents). Treat 20–9999 as dollars.
-    if 20 <= cents <= 9999:
+    # Values 20–9999 are treated as dollars (×100), except 20 handled above.
+    if 21 <= cents <= 9999:
         cents = cents * 100
     return max(100, cents)
 
