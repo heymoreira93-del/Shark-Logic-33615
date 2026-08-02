@@ -25,7 +25,13 @@ from close_path import (
     title_mailto_link,
     write_title_cover_txt,
 )
-from comms import notify_deal_signed, send_offer_sms, signing_url
+from comms import (
+    notify_deal_signed,
+    notify_phone,
+    send_offer_sms,
+    sign_alerts_configured,
+    signing_url,
+)
 from contract_gen import generate_assignment_pdf
 from data_engine import (
     address_or_phone_error,
@@ -282,6 +288,25 @@ if has_rentcast_key():
     st.sidebar.success("RentCast API key detected — live data ON.")
 else:
     st.sidebar.warning("No RentCast key — mock data. Add RENTCAST_API_KEY to `.env`.")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Sign alerts (your cell)")
+_alert_default = notify_phone() or st.session_state.get("notify_phone_ui") or ""
+_alert_in = st.sidebar.text_input(
+    "My cell for sign alerts",
+    value=_alert_default,
+    placeholder="+18135551212",
+    key="notify_phone_ui",
+    help="Get a text when seller/buyer e-signs. Saved for this session; also set NOTIFY_PHONE in .env.",
+)
+if (_alert_in or "").strip():
+    import os as _os
+
+    _os.environ["NOTIFY_PHONE"] = (_alert_in or "").strip()
+if sign_alerts_configured():
+    st.sidebar.success(f"Alerts → {notify_phone()}")
+else:
+    st.sidebar.error("No alert phone — you won't get DEAL SIGNED texts.")
 
 st.sidebar.markdown("---")
 st.sidebar.title("33615 Pipeline")
@@ -932,7 +957,16 @@ with calc_tab:
     # --- What's still missing (secrets / human) ---
     st.markdown("---")
     st.subheader("Still missing for a live close")
+    if sign_alerts_configured():
+        st.success(f"Sign alerts ON → SMS to `{notify_phone()}` when someone e-signs")
+    else:
+        st.error(
+            "Sign alerts OFF — set your cell in the sidebar (**My cell for sign alerts**) "
+            "or in `.env` as NOTIFY_PHONE=+1..."
+        )
     miss = []
+    if not sign_alerts_configured():
+        miss.append("NOTIFY_PHONE / TWILIO_AGENT_PHONE — your cell for DEAL SIGNED texts")
     if not smtp_configured():
         miss.append("EMAIL_USER + EMAIL_PASS (Gmail App Password) — auto-email buyer/title")
     if not email_configured():
