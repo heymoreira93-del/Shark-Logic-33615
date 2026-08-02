@@ -27,6 +27,7 @@ from voice import agent_phone, click_to_call, voice_configured
 
 
 def _style_war_room(df: pd.DataFrame):
+    """Color rows when Jinja2 is available; otherwise return plain DataFrame."""
     def row_style(row: pd.Series) -> list[str]:
         status = str(row.get("Status", ""))
         flood = bool(row.get("Flood", False))
@@ -44,7 +45,10 @@ def _style_war_room(df: pd.DataFrame):
             color = ""
         return [color] * len(row)
 
-    return df.style.apply(row_style, axis=1)
+    try:
+        return df.style.apply(row_style, axis=1)
+    except (AttributeError, ImportError):
+        return df
 
 
 def _render_contract_agent(buyer_name: str) -> None:
