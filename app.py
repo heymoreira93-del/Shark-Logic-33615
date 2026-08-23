@@ -50,8 +50,12 @@ from db import (
     find_assignment_deal,
     get_deal,
     init_db,
+    latest_paid_emd,
+    list_blast_logs,
     list_deals,
+    list_emd_payments,
     mark_as_signed,
+    record_blast,
     update_lead_temp,
 )
 from email_blast import (
@@ -63,7 +67,15 @@ from email_blast import (
 )
 from generator import generate_contract
 from hunter import skip_trace
-from payments import create_checkout_session, emd_amount_dollars, stripe_configured, stripe_mode
+from payments import (
+    confirm_checkout_session,
+    create_checkout_session,
+    emd_amount_dollars,
+    reconcile_recent_sessions,
+    stripe_account_status,
+    stripe_configured,
+    stripe_mode,
+)
 from rehab import (
     apply_tampa_risk_adjustments,
     calculate_rehab,
@@ -79,7 +91,7 @@ from tampa_config import DEFAULT_CLOSING_COST_PCT, MANUAL_FLOOD_MAO_HIT
 
 # Alias: High Risk Flood Zone AE hit ($15k) — same as MANUAL_FLOOD_MAO_HIT
 HIGH_RISK_FLOOD_HIT = MANUAL_FLOOD_MAO_HIT
-from tampa_leads import mock_tampa_offmarket_leads, prepare_recent_filings_parse
+from tampa_leads import prepare_recent_filings_parse
 from war_room import render_war_room
 
 # Bind CRM helpers after full module load (avoids Streamlit stale-import crashes)
@@ -803,21 +815,51 @@ with calc_tab:
         "PDF unlocks after EMD (or skip gate locally if Stripe is not configured)."
     )
 
-    # Honor Stripe success redirect
-    try:
-        q = st.query_params
-        if q.get("emd_paid") in ("1", "true", "True") or q.get("success") in ("1", "true", "True"):
-            st.session_state.paid = True
-        if q.get("emd_cancel") in ("1", "true", "True"):
-            st.session_state.paid = False
-    except Exception:
-        pass
+    # Stripe return: verify Checkout Session with Stripe. Never trust ?emd_paid=.
+    if "emd_verified" not in st.session_state:
+        st.session_state.emd_verified = False
+    if "emd_manual_override" not in st.session_state:
+        st.session_state.emd_manual_override = False
     if "paid" not in st.session_state:
         st.session_state.paid = False
     if "checkout_url" not in st.session_state:
         st.session_state.checkout_url = ""
     if "assign_pdf_path" not in st.session_state:
         st.session_state.assign_pdf_path = ""
+    try:
+        q = st.query_params
+        if q.get("emd_cancel") in ("1", "true", "True"):
+            st.warning("EMD checkout canceled — no payment recorded.")
+        sid = q.get("session_id")
+        if isinstance(sid, list):
+            sid = sid[0] if sid else ""
+        if sid:
+            confirmed = confirm_checkout_session(str(sid))
+            if confirmed.get("paid"):
+                st.session_state.emd_verified = True
+                st.session_state.paid = True
+                st.session_state.last_emd_session_id = confirmed.get("session_id")
+                st.success(
+                    "EMD verified by Stripe "
+                    f"(session …{(confirmed.get('session_id') or '')[-8:]})."
+                )
+            else:
+                st.error(
+                    "Returned from Stripe but payment is NOT verified: "
+                    + (confirmed.get("error") or "unknown")
+                )
+        if q.get("emd_paid") in ("1", "true", "True") or q.get("success") in ("1", "true", "True"):
+            if not st.session_state.emd_verified:
+                st.warning(
+                    "Ignored ?emd_paid= / ?success= — those flags cannot unlock a deal. "
+                    "Pay via Stripe Checkout so the session can be retrieved and stored."
+                )
+    except Exception as exc:
+        st.error(f"EMD return handling failed: {exc}")
+    persisted = latest_paid_emd()
+    if persisted and not st.session_state.emd_verified:
+        st.session_state.emd_verified = True
+        st.session_state.paid = True
 
     emd = emd_amount_dollars()
     gate_on = stripe_configured()
@@ -837,11 +879,31 @@ with calc_tab:
         )
     if not email_on:
         st.caption("Buyer blast blocked — set: EMAIL_USER, EMAIL_PASS, BUYER_EMAILS")
+    acct = stripe_account_status() if gate_on else {}
     if mode == "live":
+        if acct.get("live_charges_blocked") or not acct.get("charges_enabled"):
+            st.error(
+                "A) Stripe LIVE charges are blocked. Dashboard → Activate account "
+                "(identity + business). Until that flips on, checkout cannot take a real card. "
+                "Use a sk_test_ key only for practice charges."
+            )
+        elif acct.get("charges_enabled") and not acct.get("payouts_enabled"):
+            st.warning(
+                "B) Live charges work, but payouts are OFF. Add your bank in Stripe → "
+                "Settings → Bank accounts and payouts, then send the first real EMD checkout."
+            )
+        elif acct.get("charges_enabled") and acct.get("payouts_enabled"):
+            st.success(
+                "B) Live charges + payouts ON. First real buyer EMD starts Stripe’s "
+                "first-payout clock (usually 7–14 days)."
+            )
         st.caption(
-            "Stripe is on LIVE keys. If checkout fails with 'cannot make live charges', "
-            "finish Stripe Activate / identity, or use sk_test_ until approved."
+            f"Stripe account: charges={'ON' if acct.get('charges_enabled') else 'OFF'} · "
+            f"payouts={'ON' if acct.get('payouts_enabled') else 'OFF'} · "
+            f"bank={'linked' if acct.get('bank_linked') else 'missing'}"
         )
+        if acct.get("error"):
+            st.caption(f"Stripe probe: {acct['error']}")
 
     st.warning(
         "A deal is **not assigned** until a real cash buyer agrees and is named below. "
@@ -1073,7 +1135,7 @@ with calc_tab:
             st.session_state.title_cover = cover
             if not st.session_state.get("assign_pdf_path") or not st.session_state.get("assign_pdf_live"):
                 _gen_assignment_pdf(
-                    emd_paid_via_stripe=bool(st.session_state.paid and gate_on)
+                    emd_paid_via_stripe=bool(st.session_state.emd_verified and gate_on)
                 )
             st.success("Title packet ready — download cover + assignment, then open mailto.")
             st.rerun()
@@ -1162,14 +1224,15 @@ with calc_tab:
         if not live_buyer and not draft_only:
             st.error("Unlock blocked — lock a real committed buyer first (or Draft only).")
         else:
+            st.session_state.emd_manual_override = True
             st.session_state.paid = True
             if not address.strip():
                 st.warning("Unlocked paywall — enter an address, then Generate PDF / VERIFY.")
             else:
-                path = _gen_assignment_pdf(emd_paid_via_stripe=bool(gate_on))
+                path = _gen_assignment_pdf(emd_paid_via_stripe=False)
                 if path:
-                    st.success(
-                        "PDF unlocked (wire / dev). Download below."
+                    st.warning(
+                        "PDF unlocked as WIRE / DEV override — this is NOT a Stripe-verified EMD."
                         + (" LIVE buyer on face." if live_buyer else " DRAFT only.")
                     )
 
@@ -1216,10 +1279,11 @@ with calc_tab:
                         err = getattr(create_checkout_session, "last_error", "") or "check STRIPE_SECRET_KEY"
                         st.error(f"Stripe session failed: {err}")
                 else:
+                    st.session_state.emd_manual_override = True
                     st.session_state.paid = True
 
                 path = _gen_assignment_pdf(
-                    emd_paid_via_stripe=bool(st.session_state.paid and gate_on)
+                    emd_paid_via_stripe=bool(st.session_state.emd_verified and gate_on)
                 )
                 if path:
                     st.success(
@@ -1243,6 +1307,13 @@ with calc_tab:
                         float(assignment_fee),
                         pay_link,
                         flood_risk=bool(high_risk_flood or flood_buffer > 0),
+                    )
+                    record_blast(
+                        address=address.strip(),
+                        ok=ok,
+                        message=msg,
+                        recipients=0,
+                        checkout_url=pay_link if pay_link.startswith("http") else "",
                     )
                     if ok:
                         st.success(f"BLAST OK — {msg}")
@@ -1339,8 +1410,14 @@ with calc_tab:
             else:
                 st.error(msg)
 
-    # Paywall
-    paid = bool(st.session_state.paid) or not gate_on
+    # Paywall — Stripe-verified EMD, persisted paid row, or explicit wire override
+    paid = (
+        bool(st.session_state.emd_verified)
+        or bool(st.session_state.emd_manual_override)
+        or bool(latest_paid_emd(address.strip()) if address.strip() else None)
+        or not gate_on
+    )
+    st.session_state.paid = paid
     if gate_on and not paid:
         st.warning(f"Pay ${emd:,.0f} non-refundable EMD to unlock the contract PDF.")
         if st.session_state.checkout_url:
@@ -1371,9 +1448,11 @@ with calc_tab:
             else:
                 st.error("Enter address first.")
     else:
-        if st.session_state.paid and gate_on:
+        if st.session_state.emd_verified and gate_on:
             st.balloons()
-            st.success("EMD received (or unlocked). Download Assignment + Wire Instructions:")
+            st.success("EMD verified by Stripe. Download Assignment + Wire Instructions:")
+        elif st.session_state.emd_manual_override and gate_on:
+            st.warning("PDF unlocked via wire/dev override — Stripe did not confirm this EMD.")
         pdf_path = Path(st.session_state.assign_pdf_path) if st.session_state.assign_pdf_path else None
         if pdf_path and pdf_path.exists():
             with pdf_path.open("rb") as f:
@@ -1388,7 +1467,7 @@ with calc_tab:
         elif paid and address.strip():
             if st.button("Generate PDF now", use_container_width=True):
                 path = _gen_assignment_pdf(
-                    emd_paid_via_stripe=bool(st.session_state.paid),
+                    emd_paid_via_stripe=bool(st.session_state.emd_verified),
                 )
                 if path:
                     st.rerun()
@@ -1409,9 +1488,21 @@ with calc_tab:
         else:
             st.error(result.get("error", "Failed"))
 
-    with st.expander("Demo off-market lead ideas"):
-        for row in mock_tampa_offmarket_leads():
-            st.write(f"**{row['type']}** · {row['area']} — {row['note']}")
+    with st.expander("EMD payments (admin)"):
+        st.caption("Source of truth: Stripe session retrieve + emd_payments table. Query flags do not count.")
+        if st.button("Reconcile recent Stripe checkouts", key="reconcile_emd"):
+            rows = reconcile_recent_sessions(20)
+            paid_n = sum(1 for r in rows if r.get("paid"))
+            st.info(f"Reconciled {len(rows)} session(s); {paid_n} newly/already paid.")
+        pays = list_emd_payments(40)
+        if pays:
+            st.dataframe(pays, use_container_width=True, hide_index=True)
+        else:
+            st.info("No EMD payment rows yet.")
+        blasts = list_blast_logs(15)
+        if blasts:
+            st.caption("Buyer blast log")
+            st.dataframe(blasts, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.subheader("Morning Pipeline (Contracts)")

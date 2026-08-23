@@ -4,13 +4,15 @@ Closer module — SQLite deal storage for click-to-sign + call notes + lead heat
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DB_PATH = Path(__file__).resolve().parent / "deals.db"
+_DEFAULT_DB = Path(__file__).resolve().parent / "deals.db"
+DB_PATH = Path(os.getenv("DEALSHARK_DB_PATH") or _DEFAULT_DB)
 
 LEAD_TEMPS = ("Cold", "Warm", "Hot")
 
@@ -60,11 +62,48 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE deals ADD COLUMN assignment_fee REAL DEFAULT 0")
     if "assignee_email" not in cols:
         conn.execute("ALTER TABLE deals ADD COLUMN assignee_email TEXT DEFAULT ''")
+    if "emd_status" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN emd_status TEXT DEFAULT ''")
+    if "stripe_session_id" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN stripe_session_id TEXT DEFAULT ''")
+    if "stripe_payment_intent" not in cols:
+        conn.execute("ALTER TABLE deals ADD COLUMN stripe_payment_intent TEXT DEFAULT ''")
+
+
+_PAYMENTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS emd_payments (
+    id TEXT PRIMARY KEY,
+    stripe_session_id TEXT NOT NULL UNIQUE,
+    stripe_payment_intent TEXT DEFAULT '',
+    deal_id TEXT DEFAULT '',
+    address TEXT DEFAULT '',
+    amount_cents INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'PENDING',
+    mode TEXT DEFAULT '',
+    checkout_url TEXT DEFAULT '',
+    created_at TEXT DEFAULT '',
+    paid_at TEXT DEFAULT ''
+)
+"""
+
+_BLAST_SCHEMA = """
+CREATE TABLE IF NOT EXISTS blast_logs (
+    id TEXT PRIMARY KEY,
+    address TEXT DEFAULT '',
+    recipients INTEGER DEFAULT 0,
+    ok INTEGER DEFAULT 0,
+    message TEXT DEFAULT '',
+    checkout_url TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+)
+"""
 
 
 def init_db() -> None:
     with _connect() as conn:
         conn.execute(_SCHEMA)
+        conn.execute(_PAYMENTS_SCHEMA)
+        conn.execute(_BLAST_SCHEMA)
         _ensure_columns(conn)
         conn.commit()
 
@@ -276,3 +315,228 @@ def find_assignment_deal(address: str, *, signed_only: bool = False) -> dict[str
         if needle in hay or (street and street in hay):
             return deal
     return None
+
+
+def record_checkout_session(
+    *,
+    stripe_session_id: str,
+    address: str = "",
+    deal_id: str = "",
+    amount_cents: int = 0,
+    mode: str = "",
+    status: str = "PENDING",
+    checkout_url: str = "",
+    stripe_payment_intent: str = "",
+) -> str:
+    """Insert or update a checkout row. Returns payment row id."""
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    sid = (stripe_session_id or "").strip()
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM emd_payments WHERE stripe_session_id = ?",
+            (sid,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE emd_payments
+                SET address = COALESCE(NULLIF(?, ''), address),
+                    deal_id = COALESCE(NULLIF(?, ''), deal_id),
+                    amount_cents = CASE WHEN ? > 0 THEN ? ELSE amount_cents END,
+                    status = ?,
+                    mode = COALESCE(NULLIF(?, ''), mode),
+                    checkout_url = COALESCE(NULLIF(?, ''), checkout_url),
+                    stripe_payment_intent = COALESCE(NULLIF(?, ''), stripe_payment_intent)
+                WHERE stripe_session_id = ?
+                """,
+                (
+                    address,
+                    deal_id,
+                    int(amount_cents),
+                    int(amount_cents),
+                    status,
+                    mode,
+                    checkout_url,
+                    stripe_payment_intent,
+                    sid,
+                ),
+            )
+            conn.commit()
+            return str(existing["id"])
+        row_id = str(uuid.uuid4())[:12]
+        conn.execute(
+            """
+            INSERT INTO emd_payments (
+                id, stripe_session_id, stripe_payment_intent, deal_id, address,
+                amount_cents, status, mode, checkout_url, created_at, paid_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '')
+            """,
+            (
+                row_id,
+                sid,
+                stripe_payment_intent,
+                deal_id,
+                address,
+                int(amount_cents),
+                status,
+                mode,
+                checkout_url,
+                now,
+            ),
+        )
+        conn.commit()
+        return row_id
+
+
+def mark_emd_paid_from_stripe(
+    *,
+    stripe_session_id: str,
+    address: str = "",
+    deal_id: str = "",
+    amount_cents: int = 0,
+    mode: str = "",
+    stripe_payment_intent: str = "",
+) -> str:
+    """Idempotent paid write. Same session_id never creates a second paid event."""
+    init_db()
+    now = datetime.now(timezone.utc).isoformat()
+    sid = (stripe_session_id or "").strip()
+    with _connect() as conn:
+        existing = conn.execute(
+            "SELECT id, status, paid_at FROM emd_payments WHERE stripe_session_id = ?",
+            (sid,),
+        ).fetchone()
+        if existing and (existing["status"] or "").upper() == "PAID":
+            return str(existing["id"])
+        if existing:
+            conn.execute(
+                """
+                UPDATE emd_payments
+                SET status = 'PAID',
+                    paid_at = ?,
+                    stripe_payment_intent = COALESCE(NULLIF(?, ''), stripe_payment_intent),
+                    address = COALESCE(NULLIF(?, ''), address),
+                    deal_id = COALESCE(NULLIF(?, ''), deal_id),
+                    amount_cents = CASE WHEN ? > 0 THEN ? ELSE amount_cents END,
+                    mode = COALESCE(NULLIF(?, ''), mode)
+                WHERE stripe_session_id = ?
+                """,
+                (
+                    now,
+                    stripe_payment_intent,
+                    address,
+                    deal_id,
+                    int(amount_cents),
+                    int(amount_cents),
+                    mode,
+                    sid,
+                ),
+            )
+            row_id = str(existing["id"])
+        else:
+            row_id = str(uuid.uuid4())[:12]
+            conn.execute(
+                """
+                INSERT INTO emd_payments (
+                    id, stripe_session_id, stripe_payment_intent, deal_id, address,
+                    amount_cents, status, mode, checkout_url, created_at, paid_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PAID', ?, '', ?, ?)
+                """,
+                (
+                    row_id,
+                    sid,
+                    stripe_payment_intent,
+                    deal_id,
+                    address,
+                    int(amount_cents),
+                    mode,
+                    now,
+                    now,
+                ),
+            )
+        if deal_id:
+            conn.execute(
+                """
+                UPDATE deals
+                SET emd_status = 'PAID',
+                    stripe_session_id = ?,
+                    stripe_payment_intent = ?
+                WHERE id = ?
+                """,
+                (sid, stripe_payment_intent, deal_id),
+            )
+        conn.commit()
+        return row_id
+
+
+def list_emd_payments(limit: int = 40) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM emd_payments
+            ORDER BY
+                CASE status WHEN 'PAID' THEN 0 ELSE 1 END,
+                created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def latest_paid_emd(address: str = "") -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        if address.strip():
+            row = conn.execute(
+                """
+                SELECT * FROM emd_payments
+                WHERE status = 'PAID' AND lower(address) LIKE ?
+                ORDER BY paid_at DESC LIMIT 1
+                """,
+                (f"%{address.strip().lower()}%",),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT * FROM emd_payments
+                WHERE status = 'PAID'
+                ORDER BY paid_at DESC LIMIT 1
+                """
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def record_blast(
+    *,
+    address: str,
+    ok: bool,
+    message: str,
+    recipients: int = 0,
+    checkout_url: str = "",
+) -> str:
+    init_db()
+    row_id = str(uuid.uuid4())[:12]
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO blast_logs (id, address, recipients, ok, message, checkout_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (row_id, address, int(recipients), 1 if ok else 0, message[:500], checkout_url, now),
+        )
+        conn.commit()
+    return row_id
+
+
+def list_blast_logs(limit: int = 20) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM blast_logs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]

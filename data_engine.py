@@ -96,16 +96,21 @@ def geocode_address(address: str) -> dict[str, float] | None:
         return None
 
 
+get_property_data.last_error = ""  # type: ignore[attr-defined]
+
+
 def get_property_data(address: str) -> dict[str, Any] | None:
     """
     Fetch propertyType, squareFootage, yearBuilt, lastSalePrice for an address.
     """
+    get_property_data.last_error = ""  # type: ignore[attr-defined]
     address = (address or "").strip()
     if not address:
         return None
 
     if not has_rentcast_key():
-        return _mock_property(address)
+        get_property_data.last_error = "Missing RENTCAST_API_KEY"  # type: ignore[attr-defined]
+        return None
 
     try:
         url = f"{RENTCAST_BASE}/properties?address={quote(address)}"
@@ -157,7 +162,8 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
         get_tampa_comps.last_error = bad  # type: ignore[attr-defined]
         return []
     if not has_rentcast_key():
-        return _mock_comps(address)
+        get_tampa_comps.last_error = "Missing RENTCAST_API_KEY"  # type: ignore[attr-defined]
+        return []
 
     try:
         # RentCast: radius requires address OR lat/lng — zip+radius alone returns 400.
@@ -248,9 +254,16 @@ def get_tampa_data(address: str) -> dict[str, Any]:
     if bad:
         return {"error": bad}
 
+    if not has_rentcast_key():
+        return {"error": "Missing RENTCAST_API_KEY — property lookup is OFF (no mock data)."}
+
     prop = get_property_data(address)
     if not prop:
-        return {"error": "Property not found. Double-check the address (include city/state/zip)."}
+        err = getattr(get_property_data, "last_error", "") or ""
+        return {
+            "error": err
+            or "Property not found. Double-check the address (include city/state/zip)."
+        }
 
     sqft = float(prop.get("squareFootage") or 0)
     zip_code = str(prop.get("zipCode") or extract_zip(address))

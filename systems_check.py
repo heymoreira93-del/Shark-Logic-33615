@@ -302,6 +302,14 @@ def stripe_status() -> dict[str, Any]:
         )
     elif mode == "live":
         notes.append("LIVE MODE — real card charges. Finish Stripe Activate if locked.")
+    notes.append(
+        "Payment confirm: Stripe Checkout Session retrieve on return "
+        "(?session_id=cs_...). Query ?emd_paid= is ignored."
+    )
+    notes.append(
+        "Webhooks: Streamlit Cloud cannot receive Stripe POSTs. "
+        "Optional STRIPE_WEBHOOK_SECRET is unused until a dedicated webhook host exists."
+    )
     elif key_ok:
         notes.append("Key present but not sk_/rk_ prefix — verify it is a secret key.")
     return {
@@ -411,7 +419,7 @@ def rentcast_status() -> dict[str, Any]:
         "Does NOT return cell phones.",
     ]
     if not ready:
-        notes.insert(0, "Missing RENTCAST_API_KEY — app will use MOCK property/comps.")
+        notes.insert(0, "Missing RENTCAST_API_KEY — property/comps stay empty (no mock data).")
     else:
         notes.insert(0, "Live RentCast ON — no silent mock when API returns data.")
     return {
