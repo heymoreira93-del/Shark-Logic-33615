@@ -96,9 +96,6 @@ def geocode_address(address: str) -> dict[str, float] | None:
         return None
 
 
-get_property_data.last_error = ""  # type: ignore[attr-defined]
-
-
 def get_property_data(address: str) -> dict[str, Any] | None:
     """
     Fetch propertyType, squareFootage, yearBuilt, lastSalePrice for an address.
@@ -270,13 +267,15 @@ def get_tampa_data(address: str) -> dict[str, Any]:
     comps = get_tampa_comps(address, zip_code=zip_code)
     arv, avg_pps = estimate_arv_from_comps(sqft, comps)
 
-    # If comps thin, fall back to last sale * 1.15 as rough ARV placeholder
+    arv_basis = "comps"
+    # Live property but thin comps: last sale * 1.15 is a labeled estimate, not invented solds.
     if arv <= 0 and prop.get("lastSalePrice"):
         arv = float(prop["lastSalePrice"]) * 1.15
         avg_pps = (arv / sqft) if sqft else 0
+        arv_basis = "last_sale_x_1_15"
 
     live = has_rentcast_key()
-    source = prop.get("source", "rentcast" if live else "mock")
+    source = prop.get("source") or ("rentcast" if live else "none")
     return {
         "address": address,
         "yearBuilt": prop.get("yearBuilt"),
@@ -289,6 +288,7 @@ def get_tampa_data(address: str) -> dict[str, Any]:
         "comps": comps,
         "comps_live": live,
         "comps_empty": live and not comps,
+        "arv_basis": arv_basis if arv > 0 else "none",
         "flood_risk": zip_code in FLOOD_ZIPS,
         "source": source,
     }

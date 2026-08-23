@@ -47,6 +47,7 @@ SECRET_KEYS = (
     "ASSIGNOR_SIGNATORY",
     "PEOPLE_DATA_API_URL",
     "PEOPLE_DATA_API_KEY",
+    "BATCHDATA_API_KEY",
 )
 
 # Top-level alias → canonical env (Cloud paste typos)
@@ -63,6 +64,7 @@ SECRET_ALIASES: dict[str, tuple[str, ...]] = {
     # Older skip-trace vendor paste → people-data phones
     "PEOPLE_DATA_API_URL": ("SKIP_TRACE_API_URL", "BATCHDATA_API_URL"),
     "PEOPLE_DATA_API_KEY": ("SKIP_TRACE_API_KEY", "BATCHDATA_API_KEY"),
+    "BATCHDATA_API_KEY": ("PEOPLE_DATA_API_KEY", "SKIP_TRACE_API_KEY"),
     "GOOGLE_SHEETS_URL": ("SHEETS_URL", "GSHEETS_URL"),
 }
 

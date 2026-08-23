@@ -251,8 +251,8 @@ for key, default in {
     "seller_email": "",
     "last_deal_id": "",
     "last_pdf_path": "",
-    "arv": 300000.0,
-    "sqft": 1500.0,
+    "arv": 0.0,
+    "sqft": 0.0,
     "zip_code": "",
     "comps": [],
     "year_built": None,
@@ -309,7 +309,10 @@ if high_risk_flood:
 if has_rentcast_key():
     st.sidebar.success("RentCast API key detected — live data ON.")
 else:
-    st.sidebar.warning("No RentCast key — mock data. Add RENTCAST_API_KEY to `.env`.")
+    st.sidebar.warning(
+        "RentCast lookup OFF — no live property/comps until RENTCAST_API_KEY is set. "
+        "ARV/sqft stay empty unless you type them."
+    )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Sign alerts (your cell)")
@@ -457,19 +460,22 @@ with calc_tab:
                     st.error(bundle["error"])
                 else:
                     st.session_state.arv = float(bundle.get("arv") or st.session_state.arv)
-                    st.session_state.sqft = float(bundle.get("sqft") or 1500)
+                    st.session_state.sqft = float(bundle.get("sqft") or 0)
                     st.session_state.zip_code = str(bundle.get("zipCode") or "")
                     st.session_state.comps = bundle.get("comps") or []
                     st.session_state.year_built = bundle.get("yearBuilt")
                     st.session_state.avg_sqft_price = float(bundle.get("avg_sqft_price") or 0)
                     st.session_state.data_source = bundle.get("source", "rentcast")
+                    st.session_state.arv_basis = bundle.get("arv_basis") or "none"
                     st.success(
                         f"Loaded · ARV ${st.session_state.arv:,.0f} · "
                         f"{st.session_state.sqft:,.0f} sqft · "
                         f"source={st.session_state.data_source}"
                     )
-                    if st.session_state.data_source == "mock":
-                        st.warning("MOCK data — add RENTCAST_API_KEY for live ARV/comps.")
+                    if bundle.get("arv_basis") == "last_sale_x_1_15":
+                        st.warning(
+                            "ARV is last-sale × 1.15 (no sold comps). Verify before offering."
+                        )
                     elif not st.session_state.comps:
                         st.warning(
                             "Live RentCast returned no nearby sold comps. "
@@ -491,13 +497,11 @@ with calc_tab:
                             or "Live skip-trace configured but no owner found for this address."
                         )
                         st.caption(f"source=`{src}` — paste owner name / phone manually.")
-                    elif src == "mock":
-                        st.warning(
-                            "MOCK owner (no RENTCAST_API_KEY). Add key for live owner names."
+                    elif src in ("mock", "not_configured"):
+                        st.error(
+                            hit.get("error")
+                            or "Skip-trace is OFF. Set RENTCAST_API_KEY or paste owner manually."
                         )
-                        st.session_state.seller_name = hit.get("owner_name") or ""
-                        st.session_state.seller_phone = hit.get("phone") or ""
-                        st.session_state.seller_email = hit.get("email") or ""
                     else:
                         st.session_state.seller_name = hit.get("owner_name") or ""
                         st.session_state.seller_phone = hit.get("phone") or ""
@@ -507,11 +511,30 @@ with calc_tab:
                         )
                         if hit.get("mailing_address"):
                             st.caption(f"Mailing: {hit.get('mailing_address')}")
-                        if not hit.get("phone"):
+                        if hit.get("phone"):
+                            src_p = hit.get("phone_source") or "vendor"
+                            st.success(f"Cell found · source=`{src_p}` · `{hit.get('phone')}`")
+                        else:
+                            err = hit.get("phone_error") or ""
+                            st.warning(
+                                err
+                                or (
+                                    "Owner name pulled — no cell on file. "
+                                    "Add `BATCHDATA_API_KEY` in `.env` for auto phones, "
+                                    "or paste mobile below for SMS."
+                                )
+                            )
+                        if hit.get("email"):
+                            src_e = hit.get("email_source") or hit.get("phone_source") or "vendor"
+                            st.success(f"Email found · source=`{src_e}` · `{hit.get('email')}`")
+                        else:
+                            err_e = hit.get("email_error") or ""
                             st.info(
-                                "Owner name pulled from RentCast. "
-                                "No cell on file — paste mobile manually for SMS "
-                                "(people-data vendors are separate)."
+                                err_e
+                                or (
+                                    "No email on file — add `BATCHDATA_API_KEY` "
+                                    "or paste Seller Email below."
+                                )
                             )
                 else:
                     st.error("Skip trace returned nothing.")
@@ -528,9 +551,18 @@ with calc_tab:
         )
         st.session_state.seller_phone = mobile
 
+        seller_email = st.text_input(
+            "Seller Email",
+            value=st.session_state.get("seller_email") or "",
+            placeholder="seller@email.com",
+            key="calc_seller_email",
+            help="Owner email from BatchData Skip Trace (or paste manually).",
+        )
+        st.session_state.seller_email = seller_email
+
         sqft = st.number_input(
             "Square Footage",
-            value=float(st.session_state.sqft or 1500),
+            value=float(st.session_state.sqft or 0),
             step=50.0,
             key="calc_sqft",
         )
@@ -576,7 +608,7 @@ with calc_tab:
 
         arv = st.number_input(
             "After Repair Value (ARV) ($)",
-            value=float(st.session_state.arv or 300000),
+            value=float(st.session_state.arv or 0),
             step=5000.0,
             key="calc_arv",
         )

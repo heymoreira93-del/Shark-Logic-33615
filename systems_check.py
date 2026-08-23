@@ -302,6 +302,8 @@ def stripe_status() -> dict[str, Any]:
         )
     elif mode == "live":
         notes.append("LIVE MODE — real card charges. Finish Stripe Activate if locked.")
+    elif key_ok:
+        notes.append("Key present but not sk_/rk_ prefix — verify it is a secret key.")
     notes.append(
         "Payment confirm: Stripe Checkout Session retrieve on return "
         "(?session_id=cs_...). Query ?emd_paid= is ignored."
@@ -310,8 +312,6 @@ def stripe_status() -> dict[str, Any]:
         "Webhooks: Streamlit Cloud cannot receive Stripe POSTs. "
         "Optional STRIPE_WEBHOOK_SECRET is unused until a dedicated webhook host exists."
     )
-    elif key_ok:
-        notes.append("Key present but not sk_/rk_ prefix — verify it is a secret key.")
     return {
         "ready": ready,
         "label": "Stripe EMD",
@@ -427,23 +427,32 @@ def rentcast_status() -> dict[str, Any]:
         "label": "RentCast Data",
         "notes": notes,
         "missing": missing,
-        "mode": "live" if ready else "mock",
+        "mode": "live" if ready else "off",
     }
 
 
 def people_data_status() -> dict[str, Any]:
-    from phone_enrich import people_data_configured
+    from phone_enrich import batchdata_configured, people_data_configured
 
     ready = people_data_configured()
-    missing = [] if ready else ["PEOPLE_DATA_API_URL", "PEOPLE_DATA_API_KEY"]
+    missing: list[str] = []
+    if not ready:
+        missing = ["BATCHDATA_API_KEY"]
     notes = [
-        "Optional: PEOPLE_DATA_API_URL + PEOPLE_DATA_API_KEY for cell enrichment.",
-        "Aliases: SKIP_TRACE_API_URL / SKIP_TRACE_API_KEY also accepted.",
-        "Without it: paste phones manually / CSV import.",
+        "Preferred: BATCHDATA_API_KEY only (built-in Property Skip Trace → phone + email).",
+        "Or PEOPLE_DATA_API_URL + PEOPLE_DATA_API_KEY for a custom HTTP vendor.",
+        "Aliases: SKIP_TRACE_API_KEY / PEOPLE_DATA_API_KEY also accepted as the BatchData token.",
+        "RentCast does NOT return cell phones or emails.",
     ]
+    if batchdata_configured():
+        notes.insert(0, "BatchData key detected — Skip Trace will request phones + emails.")
+    elif ready:
+        notes.insert(0, "Generic people-data URL+key detected.")
+    else:
+        notes.insert(0, "OFF — paste phones/emails manually until a vendor key is set.")
     return {
         "ready": ready,
-        "label": "People-Data Phones",
+        "label": "People-Data Contact",
         "notes": notes,
         "missing": missing,
         "mode": "live" if ready else "manual",

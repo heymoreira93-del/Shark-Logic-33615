@@ -4,8 +4,8 @@ Skip-trace hunter — locate owner from property address.
 Provider order:
 1. Built-in RentCast (owner name + mailing) — uses RENTCAST_API_KEY
 2. External SKIP_TRACE_API_URL + SKIP_TRACE_API_KEY
-3. Offline mock
-Then optional PEOPLE_DATA_API_* cell enrichment (RocketReach / Lusha / PropertyRadar style).
+3. Empty + error if nothing is configured (no invented owner)
+Then optional PEOPLE_DATA / BatchData enrichment for cell + email.
 """
 
 from __future__ import annotations
@@ -82,23 +82,55 @@ def skip_trace(address: str) -> dict[str, Any] | None:
             }
         else:
             hit = {
-                "owner_name": "John Doe (mock - add RENTCAST_API_KEY for live owner)",
+                "owner_name": "",
                 "phone": "",
-                "email": "johndoe@example.com",
+                "email": "",
                 "mailing_address": address,
-                "source": "mock",
+                "source": "not_configured",
+                "error": (
+                    "Skip-trace is OFF — set RENTCAST_API_KEY (owner name) "
+                    "and/or SKIP_TRACE_API_URL + SKIP_TRACE_API_KEY. "
+                    "Paste owner/phone manually until then."
+                ),
             }
 
-    if not (hit.get("phone") or "").strip() and people_data_configured():
+    needs_phone = not (hit.get("phone") or "").strip()
+    needs_email = not (hit.get("email") or "").strip()
+    if needs_phone or needs_email:
         enrich = enrich_phone(
             owner_name=str(hit.get("owner_name") or ""),
             address=address,
             mailing_address=str(hit.get("mailing_address") or ""),
         )
-        if enrich.get("phone"):
+        src = enrich.get("source") or "people_data"
+        if enrich.get("phone") and needs_phone:
             hit["phone"] = enrich["phone"]
-            hit["phone_source"] = enrich.get("source") or "people_data"
-        else:
-            hit["phone_error"] = enrich.get("error") or ""
+            hit["phone_source"] = src
+        if enrich.get("email") and needs_email:
+            hit["email"] = enrich["email"]
+            hit["email_source"] = src
+        # Prefer BatchData name only when RentCast left a placeholder
+        ename = (enrich.get("owner_name") or "").strip()
+        oname = (hit.get("owner_name") or "").strip().lower()
+        if ename and (not oname or oname.startswith("owner on file")):
+            hit["owner_name"] = ename
+
+        if needs_phone and not (hit.get("phone") or "").strip():
+            hit["phone_error"] = enrich.get("error") or (
+                "No cell found. Add BATCHDATA_API_KEY or paste mobile manually."
+                if not people_data_configured()
+                else "Phone vendor returned no number for this address."
+            )
+        if needs_email and not (hit.get("email") or "").strip():
+            if people_data_configured():
+                hit["email_error"] = (
+                    enrich.get("error")
+                    or "Vendor returned no email for this address."
+                )
+            else:
+                hit["email_error"] = (
+                    "No email vendor configured. Add BATCHDATA_API_KEY "
+                    "or paste email manually."
+                )
 
     return hit
