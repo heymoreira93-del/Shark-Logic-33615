@@ -16,6 +16,7 @@ bootstrap_secrets()
 
 import crm as _crm
 
+from blueprint import render_blueprint_panel, score_zombie_lead
 from close_path import (
     build_title_cover_email,
     close_checklist,
@@ -377,8 +378,8 @@ with st.sidebar.expander("Stack Status (Go-Live)", expanded=False):
         mark = "ON" if row["ready"] else "OFF"
         st.caption(f"{mark} · {row['label']}")
 
-calc_tab, hunt_tab, war_tab, status_tab = st.tabs(
-    ["Calculator", "Seller Factory", "Tampa War Room", "Go-Live Check"]
+calc_tab, hunt_tab, war_tab, blueprint_tab, status_tab = st.tabs(
+    ["Calculator", "Seller Factory", "Tampa War Room", "Blueprint", "Go-Live Check"]
 )
 
 # ===========================================================================
@@ -392,6 +393,12 @@ with hunt_tab:
 # ===========================================================================
 with war_tab:
     render_war_room(buyer_name=buyer_name.strip() or "DealShark")
+
+# ===========================================================================
+# TAB: Zombie Assignment Blueprint
+# ===========================================================================
+with blueprint_tab:
+    render_blueprint_panel()
 
 # ===========================================================================
 # TAB: Go-Live Check
@@ -704,6 +711,19 @@ with calc_tab:
             risk = "HIGH (Flood Zone - manual)"
         if high_risk_flood:
             risk = "HIGH RISK FLOOD ZONE (AE)"
+        contact = "Unknown"
+        if (mobile or "").strip():
+            contact = "Phone Found"
+        elif (st.session_state.get("seller_email") or "").strip():
+            contact = "Email Found"
+        equity = max(0.0, float(effective_arv) - float(rehab.get("total") or 0))
+        scored = score_zombie_lead(
+            absentee=False,
+            estimated_equity=equity,
+            owner_contact_status=contact,
+            arv=float(effective_arv),
+            mao=final_mao,
+        )
         return save_lead(
             address=address.strip(),
             zip_code=zip_code,
@@ -715,6 +735,15 @@ with calc_tab:
             status=status,
             seller_name=seller_name.strip(),
             seller_phone=mobile.strip(),
+            seller_email=(st.session_state.get("seller_email") or "").strip(),
+            repairs_estimate=float(rehab.get("total") or 0),
+            estimated_equity=equity,
+            owner_contact_status=contact,
+            motivation_score=int(scored["motivation_score"]),
+            motivation_tier=str(scored["tier"]),
+            motive_tags=", ".join(scored.get("tags") or []),
+            title_status="Not Sent",
+            buyer_status="None",
         )
 
     if save_lead_btn:

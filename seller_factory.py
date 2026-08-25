@@ -15,6 +15,7 @@ from urllib.parse import quote, urlencode
 import requests
 from dotenv import load_dotenv
 
+from blueprint import score_zombie_lead
 from data_engine import extract_zip, has_rentcast_key
 from database import init_db, save_lead
 from rehab import apply_tampa_risk_adjustments, shark_mao
@@ -126,7 +127,8 @@ def hunt_sellers(
         mao = float(hazard["adjusted_mao"])
 
         motive = []
-        if owner_occupied is False:
+        absentee = owner_occupied is False
+        if absentee:
             motive.append("Absentee owner")
         if owner_occupied is None:
             motive.append("Owner-occupy unknown")
@@ -135,6 +137,28 @@ def hunt_sellers(
         year = prop.get("yearBuilt")
         if year and int(year) < 1980:
             motive.append(f"Built {year}")
+
+        mailing = owner_info.get("mailing_address") or ""
+        # Vacant/zombie look proxy: absentee AND mailing differs from subject
+        vacant_proxy = bool(
+            absentee
+            and mailing
+            and mailing.split(",")[0].strip().lower()
+            != (formatted.split(",")[0].strip().lower())
+        )
+        if vacant_proxy:
+            motive.append("Mailing ≠ subject (possible vacant)")
+
+        last_sale_f = float(last_sale or 0)
+        equity_proxy = max(0.0, arv - last_sale_f) if last_sale_f else 0.0
+        scored = score_zombie_lead(
+            vacant=vacant_proxy,
+            absentee=absentee,
+            estimated_equity=equity_proxy,
+            owner_contact_status="Mailing Only" if mailing else "Unknown",
+            arv=arv,
+            mao=mao,
+        )
 
         lead = {
             "address": formatted,
@@ -146,8 +170,17 @@ def hunt_sellers(
             "flood_risk": bool(hazard.get("is_flood_zip")),
             "seller_name": owner_info.get("owner_name") or "",
             "seller_phone": "",
-            "mailing_address": owner_info.get("mailing_address") or "",
+            "mailing_address": mailing,
             "owner_occupied": owner_occupied,
+            "vacant": vacant_proxy,
+            "absentee": absentee,
+            "last_sale_price": last_sale_f,
+            "estimated_equity": round(equity_proxy, 2),
+            "repairs_estimate": float(default_rehab),
+            "owner_contact_status": "Mailing Only" if mailing else "Unknown",
+            "motivation_score": scored["motivation_score"],
+            "motivation_tier": scored["tier"],
+            "motive_tags": ", ".join(scored["tags"] or motive) or "Zip hunt",
             "motive": ", ".join(motive) or "Zip hunt",
             "status": "New Lead",
             "source": "seller_factory",
@@ -169,6 +202,17 @@ def hunt_sellers(
                 status="New Lead",
                 seller_name=lead["seller_name"],
                 seller_phone="",
+                mailing_address=lead.get("mailing_address") or "",
+                vacant=bool(lead.get("vacant")),
+                absentee=bool(lead.get("absentee")),
+                owner_occupied=lead.get("owner_occupied"),
+                last_sale_price=float(lead.get("last_sale_price") or 0),
+                estimated_equity=float(lead.get("estimated_equity") or 0),
+                repairs_estimate=float(lead.get("repairs_estimate") or 0),
+                owner_contact_status=lead.get("owner_contact_status") or "Unknown",
+                motivation_score=int(lead.get("motivation_score") or 0),
+                motivation_tier=lead.get("motivation_tier") or "",
+                motive_tags=lead.get("motive_tags") or "",
             )
             saved += 1
 

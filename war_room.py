@@ -302,13 +302,21 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
                 "ID": r["id"],
                 "Address": r.get("address") or "",
                 "Zip": r.get("zip_code") or "",
+                "Score": int(r.get("motivation_score") or 0),
+                "Tier": r.get("motivation_tier") or "",
                 "ARV": float(r.get("arv") or 0),
                 "MAO": float(r.get("mao") or 0),
                 "Fee": float(r.get("wholesale_fee") or 0),
+                "Vacant": bool(r.get("vacant")),
+                "Absentee": bool(r.get("absentee")),
+                "FC Case": r.get("foreclosure_case") or "",
+                "Title": r.get("title_status") or "Not Sent",
+                "Buyer": r.get("buyer_status") or "None",
                 "Risk": r.get("risk_level") or "Standard",
                 "Flood": bool(r.get("flood_risk")),
                 "Status": r.get("status") or "New Lead",
                 "Phone": r.get("seller_phone") or "",
+                "Email": r.get("seller_email") or "",
                 "Last Contact": r.get("last_contacted") or "—",
                 "Date": r.get("date_added") or "",
             }
@@ -341,8 +349,12 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
         flood_tag = " · FLOOD" if r.get("flood_risk") else ""
         st.markdown(
             f"### #{r['id']} · {r.get('status')} · {r.get('address')} · "
-            f"MAO ${float(r.get('mao') or 0):,.0f}{flood_tag}"
+            f"MAO ${float(r.get('mao') or 0):,.0f}{flood_tag} · "
+            f"Score {int(r.get('motivation_score') or 0)} ({r.get('motivation_tier') or '—'})"
         )
+        tags = (r.get("motive_tags") or "").strip()
+        if tags:
+            st.caption(tags)
         c1, c2, c3 = st.columns(3)
         with c1:
             new_status = st.selectbox(
@@ -359,7 +371,12 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
                 st.rerun()
         with c2:
             st.write(f"**Seller:** {r.get('seller_name') or '—'}")
+            st.write(f"**Mailing:** {r.get('mailing_address') or '—'}")
             st.write(f"**Risk:** {r.get('risk_level')}")
+            st.write(
+                f"**Title:** {r.get('title_status') or 'Not Sent'} · "
+                f"**Buyer:** {r.get('buyer_status') or 'None'}"
+            )
             phone_in = st.text_input(
                 "Cell (paste from TruePeopleSearch / Lusha)",
                 value=r.get("seller_phone") or "",

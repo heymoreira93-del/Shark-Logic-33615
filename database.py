@@ -82,9 +82,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "flood_risk": "INTEGER DEFAULT 0",
         "seller_name": "TEXT DEFAULT ''",
         "seller_phone": "TEXT DEFAULT ''",
+        "seller_email": "TEXT DEFAULT ''",
         "last_contacted": "TEXT DEFAULT ''",
         "wholesale_fee": "REAL DEFAULT 10000",
         "risk_level": "TEXT DEFAULT 'Standard'",
+        # Zombie / assignment blueprint fields
+        "mailing_address": "TEXT DEFAULT ''",
+        "vacant": "INTEGER DEFAULT 0",
+        "absentee": "INTEGER DEFAULT 0",
+        "owner_occupied": "INTEGER DEFAULT -1",
+        "code_violation": "INTEGER DEFAULT 0",
+        "tax_delinquent": "INTEGER DEFAULT 0",
+        "foreclosure_case": "TEXT DEFAULT ''",
+        "lender": "TEXT DEFAULT ''",
+        "unpaid_taxes": "REAL DEFAULT 0",
+        "municipal_liens": "REAL DEFAULT 0",
+        "hoa_dues": "REAL DEFAULT 0",
+        "probate": "INTEGER DEFAULT 0",
+        "estimated_equity": "REAL DEFAULT 0",
+        "last_sale_price": "REAL DEFAULT 0",
+        "repairs_estimate": "REAL DEFAULT 0",
+        "owner_contact_status": "TEXT DEFAULT 'Unknown'",
+        "motivation_score": "INTEGER DEFAULT 0",
+        "motivation_tier": "TEXT DEFAULT ''",
+        "motive_tags": "TEXT DEFAULT ''",
+        "title_status": "TEXT DEFAULT 'Not Sent'",
+        "buyer_status": "TEXT DEFAULT 'None'",
+        "notes": "TEXT DEFAULT ''",
     }
     for name, decl in extras.items():
         if name not in cols:
@@ -103,17 +127,55 @@ def save_lead(
     status: str = "New Lead",
     seller_name: str = "",
     seller_phone: str = "",
+    seller_email: str = "",
+    mailing_address: str = "",
+    vacant: bool = False,
+    absentee: bool = False,
+    owner_occupied: bool | None = None,
+    code_violation: bool = False,
+    tax_delinquent: bool = False,
+    foreclosure_case: str = "",
+    lender: str = "",
+    unpaid_taxes: float = 0.0,
+    municipal_liens: float = 0.0,
+    hoa_dues: float = 0.0,
+    probate: bool = False,
+    estimated_equity: float = 0.0,
+    last_sale_price: float = 0.0,
+    repairs_estimate: float = 0.0,
+    owner_contact_status: str = "Unknown",
+    motivation_score: int = 0,
+    motivation_tier: str = "",
+    motive_tags: str = "",
+    title_status: str = "Not Sent",
+    buyer_status: str = "None",
+    notes: str = "",
 ) -> int:
     """Insert a Tampa lead. Returns new row id."""
     init_db()
     date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if owner_occupied is True:
+        oo = 1
+    elif owner_occupied is False:
+        oo = 0
+    else:
+        oo = -1
     with _connect() as conn:
         cur = conn.execute(
             """
             INSERT INTO leads (
                 address, zip_code, arv, mao, wholesale_fee, risk_level,
-                flood_risk, status, seller_name, seller_phone, date_added
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                flood_risk, status, seller_name, seller_phone, seller_email,
+                mailing_address, vacant, absentee, owner_occupied,
+                code_violation, tax_delinquent, foreclosure_case, lender,
+                unpaid_taxes, municipal_liens, hoa_dues, probate,
+                estimated_equity, last_sale_price, repairs_estimate,
+                owner_contact_status, motivation_score, motivation_tier,
+                motive_tags, title_status, buyer_status, notes, date_added
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 address,
@@ -126,6 +188,29 @@ def save_lead(
                 status if status in STATUSES else "New Lead",
                 seller_name,
                 seller_phone,
+                seller_email,
+                mailing_address,
+                1 if vacant else 0,
+                1 if absentee else 0,
+                oo,
+                1 if code_violation else 0,
+                1 if tax_delinquent else 0,
+                (foreclosure_case or "").strip(),
+                (lender or "").strip(),
+                float(unpaid_taxes or 0),
+                float(municipal_liens or 0),
+                float(hoa_dues or 0),
+                1 if probate else 0,
+                float(estimated_equity or 0),
+                float(last_sale_price or 0),
+                float(repairs_estimate or 0),
+                owner_contact_status or "Unknown",
+                int(motivation_score or 0),
+                motivation_tier or "",
+                motive_tags or "",
+                title_status or "Not Sent",
+                buyer_status or "None",
+                notes or "",
                 date,
             ),
         )
