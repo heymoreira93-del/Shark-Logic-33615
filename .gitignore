@@ -6,4 +6,7 @@ __pycache__/
 *.pyc
 .streamlit/secrets.toml
 contracts/*.pdf
+contracts/investor_reports/
 !contracts/.gitkeep
+.vercel/
+demo-site/node_modules/

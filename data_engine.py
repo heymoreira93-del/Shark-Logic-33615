@@ -129,6 +129,22 @@ def get_property_data(address: str) -> dict[str, Any] | None:
         else:
             last_sale_price = last_sale or 0
 
+        lot = prop.get("lotSize") or prop.get("lotSquareFeet") or prop.get("lotSizeSquareFeet") or 0
+        try:
+            lot_f = float(lot or 0)
+        except (TypeError, ValueError):
+            lot_f = 0.0
+        tax_assessments = prop.get("taxAssessments") or {}
+        latest_assess = 0.0
+        latest_assess_year = ""
+        if isinstance(tax_assessments, dict) and tax_assessments:
+            try:
+                latest_key = sorted(tax_assessments.keys())[-1]
+                latest_assess_year = str(latest_key)
+                node = tax_assessments.get(latest_key) or {}
+                latest_assess = float((node.get("value") if isinstance(node, dict) else node) or 0)
+            except (TypeError, ValueError, IndexError):
+                latest_assess = 0.0
         return {
             "address": address,
             "propertyType": prop.get("propertyType") or prop.get("propertyUse") or "",
@@ -138,6 +154,10 @@ def get_property_data(address: str) -> dict[str, Any] | None:
             "zipCode": str(prop.get("zipCode") or extract_zip(address)),
             "bedrooms": prop.get("bedrooms"),
             "bathrooms": prop.get("bathrooms"),
+            "lotSizeSqft": lot_f,
+            "taxAssessedValue": latest_assess,
+            "taxAssessedYear": latest_assess_year,
+            "subdivision": prop.get("subdivision") or "",
             "raw": prop,
             "source": "rentcast",
         }
@@ -146,7 +166,13 @@ def get_property_data(address: str) -> dict[str, Any] | None:
         return None
 
 
-def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0) -> list[dict[str, Any]]:
+def get_tampa_comps(
+    address: str,
+    zip_code: str = "",
+    radius_miles: float = 2.0,
+    *,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
     """
     Recent sold comps within radius (default 2 miles). Falls back to mock.
     Uses RentCast /properties + saleDateRange (true solds), not active listings.
@@ -164,8 +190,9 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
 
     try:
         # RentCast: radius requires address OR lat/lng — zip+radius alone returns 400.
+        fetch_limit = max(10, min(int(limit or 25), 50))
         params: dict[str, Any] = {
-            "limit": 10,
+            "limit": fetch_limit,
             "saleDateRange": 365,
         }
         geo = geocode_address(address) if address else None
@@ -195,6 +222,11 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
             sqft = float(item.get("squareFootage") or item.get("livingArea") or 0)
             if price <= 0:
                 continue
+            dist = item.get("distance")
+            try:
+                dist_f = float(dist) if dist is not None else float(radius_miles)
+            except (TypeError, ValueError):
+                dist_f = float(radius_miles)
             comps.append(
                 {
                     "address": item.get("formattedAddress")
@@ -203,17 +235,20 @@ def get_tampa_comps(address: str, zip_code: str = "", radius_miles: float = 2.0)
                     or "Comp",
                     "sold_price": price,
                     "status": "Sold",
-                    "distance": f"{item.get('distance', radius_miles)} mi",
-                    "beds": item.get("bedrooms") or "?",
-                    "baths": item.get("bathrooms") or "?",
+                    "distance": f"{dist_f:.1f} mi",
+                    "distance_miles": dist_f,
+                    "beds": item.get("bedrooms") if item.get("bedrooms") is not None else "?",
+                    "baths": item.get("bathrooms") if item.get("bathrooms") is not None else "?",
                     "sqft": int(sqft) if sqft else 0,
                     "price_per_sqft": (price / sqft) if sqft else 0,
                     "sale_date": item.get("lastSaleDate") or "",
+                    "propertyType": item.get("propertyType") or item.get("propertyUse") or "",
+                    "yearBuilt": item.get("yearBuilt") or item.get("year_built") or "",
                 }
             )
         # Live mode: never invent mock solds when the key is present.
         # Empty list = thin market / API miss — UI should say so, not fake ARV.
-        return comps[:10]
+        return comps[:fetch_limit]
     except Exception as exc:
         try:
             print(f"RentCast comps error: {exc}")

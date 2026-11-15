@@ -12,18 +12,44 @@ from typing import Any
 
 DB_PATH = Path(__file__).resolve().parent / "tampa_leads.db"
 
-STATUSES = (
+# Primary acquisition CRM statuses (War Room)
+CRM_STATUSES = (
+    "Not Contacted",
+    "Attempted",
+    "Interested",
+    "Negotiating",
+    "Follow Up",
+    "Under Contract",
+    "Closed",
+    "Do Not Contact",
+)
+
+# Legacy statuses kept so existing leads still validate
+_LEGACY_STATUSES = (
     "New Lead",
     "Offer Sent",
     "Hot Lead",
     "Lis Pendens",
     "Follow-up Sent",
     "Dead",
-    "Closed",
     "SIGNED",
 )
 
+STATUSES = CRM_STATUSES + tuple(s for s in _LEGACY_STATUSES if s not in CRM_STATUSES)
+
+INACTIVE_STATUSES = ("Closed", "Do Not Contact", "Dead", "SIGNED")
+
 QUEUE_STATUSES = ("QUEUED", "SENT", "FAILED", "SKIPPED")
+
+CALL_OUTCOMES = (
+    "initiated",
+    "answered",
+    "missed",
+    "failed",
+    "busy",
+    "voicemail",
+    "completed",
+)
 
 
 def _connect() -> sqlite3.Connection:
@@ -109,10 +135,40 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "title_status": "TEXT DEFAULT 'Not Sent'",
         "buyer_status": "TEXT DEFAULT 'None'",
         "notes": "TEXT DEFAULT ''",
+        "phone_source": "TEXT DEFAULT ''",
+        "phone_confidence": "TEXT DEFAULT ''",
+        "callback_at": "TEXT DEFAULT ''",
+        "dnc_flag": "INTEGER DEFAULT 0",
+        "contact_permission": "TEXT DEFAULT ''",
     }
     for name, decl in extras.items():
         if name not in cols:
             conn.execute(f"ALTER TABLE leads ADD COLUMN {name} {decl}")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS call_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER,
+            address TEXT DEFAULT '',
+            agent_phone TEXT DEFAULT '',
+            lead_phone TEXT DEFAULT '',
+            mode TEXT DEFAULT '',
+            status TEXT DEFAULT '',
+            agent_sid TEXT DEFAULT '',
+            lead_sid TEXT DEFAULT '',
+            duration_sec INTEGER DEFAULT 0,
+            error TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            ai_summary TEXT DEFAULT '',
+            is_test INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT ''
+        )
+        """
+    )
+    call_cols = {row[1] for row in conn.execute("PRAGMA table_info(call_logs)").fetchall()}
+    if "ai_summary" not in call_cols:
+        conn.execute("ALTER TABLE call_logs ADD COLUMN ai_summary TEXT DEFAULT ''")
 
 
 def save_lead(
@@ -245,6 +301,380 @@ def update_lead_phone(lead_id: int, phone: str) -> bool:
         return cur.rowcount > 0
 
 
+def update_lead_contact(
+    lead_id: int,
+    *,
+    phone: str = "",
+    email: str = "",
+    seller_name: str = "",
+    mailing_address: str = "",
+    phone_source: str = "",
+    phone_confidence: str = "",
+    owner_contact_status: str = "",
+) -> bool:
+    """Persist skip-trace / paste contact fields. Empty strings leave existing values."""
+    init_db()
+    lead = get_lead(lead_id)
+    if not lead:
+        return False
+    phone_v = (phone or "").strip() or (lead.get("seller_phone") or "")
+    email_v = (email or "").strip() or (lead.get("seller_email") or "")
+    name_v = (seller_name or "").strip() or (lead.get("seller_name") or "")
+    mail_v = (mailing_address or "").strip() or (lead.get("mailing_address") or "")
+    src_v = (phone_source or "").strip() or (lead.get("phone_source") or "")
+    conf_v = (phone_confidence or "").strip() or (lead.get("phone_confidence") or "")
+    ocs = (owner_contact_status or "").strip()
+    if not ocs:
+        if phone_v:
+            ocs = "Phone Found"
+        elif email_v:
+            ocs = "Email Found"
+        else:
+            ocs = lead.get("owner_contact_status") or "Unknown"
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE leads SET
+                seller_phone = ?,
+                seller_email = ?,
+                seller_name = ?,
+                mailing_address = ?,
+                phone_source = ?,
+                phone_confidence = ?,
+                owner_contact_status = ?
+            WHERE id = ?
+            """,
+            (phone_v, email_v, name_v, mail_v, src_v, conf_v, ocs, lead_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_lead_callback(lead_id: int, callback_at: str, notes: str = "") -> bool:
+    init_db()
+    with _connect() as conn:
+        if notes.strip():
+            cur = conn.execute(
+                """
+                UPDATE leads SET callback_at = ?,
+                    notes = TRIM(COALESCE(notes,'') || ' ' || ?)
+                WHERE id = ?
+                """,
+                ((callback_at or "").strip(), notes.strip(), lead_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE leads SET callback_at = ? WHERE id = ?",
+                ((callback_at or "").strip(), lead_id),
+            )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_lead_dnc(lead_id: int, flagged: bool = True) -> bool:
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "UPDATE leads SET dnc_flag = ?, owner_contact_status = CASE WHEN ? THEN 'Do Not Contact' ELSE owner_contact_status END WHERE id = ?",
+            (1 if flagged else 0, 1 if flagged else 0, lead_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def recent_call_exists(lead_phone: str, *, within_seconds: int = 120) -> bool:
+    """Prevent duplicate outbound dials to the same number within a short window."""
+    init_db()
+    phone = (lead_phone or "").strip()
+    if not phone:
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT created_at FROM call_logs
+            WHERE lead_phone = ? AND status IN ('queued', 'ringing', 'in-progress', 'ok', 'initiated')
+            ORDER BY id DESC LIMIT 1
+            """,
+            (phone,),
+        ).fetchone()
+    if not row:
+        return False
+    try:
+        then = datetime.strptime(str(row["created_at"]), "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - then).total_seconds() < within_seconds
+    except Exception:
+        return False
+
+
+def log_call(
+    *,
+    lead_id: int | None,
+    address: str = "",
+    agent_phone: str = "",
+    lead_phone: str = "",
+    mode: str = "",
+    status: str = "",
+    agent_sid: str = "",
+    lead_sid: str = "",
+    duration_sec: int = 0,
+    error: str = "",
+    notes: str = "",
+    is_test: bool = False,
+) -> int:
+    init_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO call_logs (
+                lead_id, address, agent_phone, lead_phone, mode, status,
+                agent_sid, lead_sid, duration_sec, error, notes, is_test, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                lead_id,
+                address or "",
+                agent_phone or "",
+                lead_phone or "",
+                mode or "",
+                status or "",
+                agent_sid or "",
+                lead_sid or "",
+                int(duration_sec or 0),
+                error or "",
+                notes or "",
+                1 if is_test else 0,
+                now,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def list_call_logs(lead_id: int | None = None, *, limit: int = 25) -> list[dict[str, Any]]:
+    init_db()
+    limit = max(1, min(int(limit), 100))
+    with _connect() as conn:
+        if lead_id is not None:
+            rows = conn.execute(
+                "SELECT * FROM call_logs WHERE lead_id = ? ORDER BY id DESC LIMIT ?",
+                (int(lead_id), limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM call_logs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_call_log(
+    call_id: int,
+    *,
+    status: str = "",
+    duration_sec: int | None = None,
+    notes: str = "",
+    error: str = "",
+    ai_summary: str = "",
+) -> bool:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM call_logs WHERE id = ?", (call_id,)).fetchone()
+        if not row:
+            return False
+        cur = conn.execute(
+            """
+            UPDATE call_logs SET
+                status = COALESCE(NULLIF(?, ''), status),
+                duration_sec = COALESCE(?, duration_sec),
+                notes = CASE WHEN ? != '' THEN ? ELSE notes END,
+                error = CASE WHEN ? != '' THEN ? ELSE error END,
+                ai_summary = CASE WHEN ? != '' THEN ? ELSE ai_summary END
+            WHERE id = ?
+            """,
+            (
+                (status or "").strip(),
+                duration_sec,
+                (notes or "").strip(),
+                (notes or "").strip(),
+                (error or "").strip(),
+                (error or "").strip(),
+                (ai_summary or "").strip(),
+                (ai_summary or "").strip(),
+                call_id,
+            ),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def append_lead_note(lead_id: int, note: str) -> bool:
+    """Append a timestamped seller note. Does not dial or message anyone."""
+    text = (note or "").strip()
+    if not text:
+        return False
+    init_db()
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    line = f"[{stamp}] {text}"
+    with _connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE leads SET notes = TRIM(
+                CASE
+                    WHEN COALESCE(notes, '') = '' THEN ?
+                    ELSE notes || char(10) || ?
+                END
+            )
+            WHERE id = ?
+            """,
+            (line, line, lead_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def ai_summary_stub(*, transcript: str = "", call_id: int | None = None) -> str:
+    """
+    Placeholder for future authorized transcription + AI summary.
+    Does not call any LLM and does not invent content from audio.
+    """
+    if not (transcript or "").strip():
+        return (
+            "[AI summary pending] Enable authorized recording/transcription, "
+            "then store the transcript to generate a summary. No audio processed."
+        )
+    preview = " ".join((transcript or "").split())[:240]
+    return f"[AI summary stub — not generated] Transcript on file ({len(transcript)} chars): {preview}"
+
+
+def get_callbacks_due(*, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Active leads with callback_at set (overdue + upcoming)."""
+    init_db()
+    now = now or datetime.now()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM leads
+            WHERE COALESCE(callback_at, '') != ''
+              AND status NOT IN ('Closed', 'Do Not Contact', 'Dead', 'SIGNED')
+            ORDER BY callback_at ASC
+            """
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        raw = str(item.get("callback_at") or "").strip()
+        overdue = False
+        upcoming = False
+        try:
+            # Accept "YYYY-MM-DD" or "YYYY-MM-DD HH:MM"
+            if len(raw) <= 10:
+                when = datetime.strptime(raw[:10], "%Y-%m-%d")
+            else:
+                try:
+                    when = datetime.strptime(raw[:16], "%Y-%m-%d %H:%M")
+                except ValueError:
+                    when = datetime.strptime(raw[:10], "%Y-%m-%d")
+            overdue = when <= now
+            upcoming = (not overdue) and (when - now).total_seconds() <= 48 * 3600
+        except Exception:
+            overdue = False
+            upcoming = False
+        item["callback_overdue"] = overdue
+        item["callback_upcoming"] = upcoming
+        out.append(item)
+    return out
+
+
+def daily_call_dashboard(*, day: str | None = None) -> dict[str, Any]:
+    """
+    Calls made today, answered, failed, callbacks due, interested sellers.
+    day: YYYY-MM-DD (defaults to today local).
+    """
+    init_db()
+    day = day or datetime.now().strftime("%Y-%m-%d")
+    with _connect() as conn:
+        calls = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT * FROM call_logs WHERE substr(created_at, 1, 10) = ? ORDER BY id DESC",
+                (day,),
+            ).fetchall()
+        ]
+        interested = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT * FROM leads
+                WHERE status IN ('Interested', 'Negotiating', 'Follow Up', 'Hot Lead')
+                  AND status NOT IN ('Closed', 'Do Not Contact', 'Dead', 'SIGNED')
+                ORDER BY date_added DESC
+                """
+            ).fetchall()
+        ]
+    answered = sum(
+        1
+        for c in calls
+        if str(c.get("status") or "").lower() in {"answered", "completed", "ok"}
+    )
+    failed = sum(
+        1
+        for c in calls
+        if str(c.get("status") or "").lower() in {"failed", "missed", "busy"}
+        or (c.get("error") or "").strip()
+    )
+    callbacks = get_callbacks_due()
+    overdue = [c for c in callbacks if c.get("callback_overdue")]
+    upcoming = [c for c in callbacks if c.get("callback_upcoming")]
+    return {
+        "day": day,
+        "calls_made": len(calls),
+        "answered": answered,
+        "failed": failed,
+        "calls": calls,
+        "callbacks_due": overdue,
+        "callbacks_upcoming": upcoming,
+        "interested": interested,
+    }
+
+
+def address_already_active(address: str) -> bool:
+    """True if a non-Dead/Closed lead already exists for this address."""
+    init_db()
+    key = " ".join((address or "").lower().split())
+    if not key:
+        return False
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT address FROM leads WHERE status NOT IN ('Dead', 'Closed', 'SIGNED', 'Do Not Contact')"
+        ).fetchall()
+    for row in rows:
+        if " ".join(str(row["address"] or "").lower().split()) == key:
+            return True
+    return False
+
+
+def mark_institutional_leads_dead() -> int:
+    """Mark LLC/SFR/trust-style owners Dead so they leave the active pipeline."""
+    from seller_factory import is_institutional_owner
+
+    init_db()
+    killed = 0
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, seller_name, status FROM leads WHERE status NOT IN ('Dead', 'Closed', 'SIGNED', 'Do Not Contact')"
+        ).fetchall()
+        for row in rows:
+            if is_institutional_owner(str(row["seller_name"] or "")):
+                conn.execute(
+                    "UPDATE leads SET status = 'Dead', notes = COALESCE(notes,'') || ' [auto: institutional owner]' WHERE id = ?",
+                    (int(row["id"]),),
+                )
+                killed += 1
+        conn.commit()
+    return killed
+
+
 def update_lead_status(lead_id: int, status: str) -> bool:
     if status not in STATUSES:
         return False
@@ -303,7 +733,7 @@ def get_pending_leads() -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT * FROM leads
-            WHERE status NOT IN ('Closed', 'Dead', 'SIGNED')
+            WHERE status NOT IN ('Closed', 'Dead', 'SIGNED', 'Do Not Contact')
             ORDER BY date_added DESC
             """
         ).fetchall()

@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from blueprint import score_zombie_lead
 from data_engine import extract_zip, has_rentcast_key
-from database import init_db, save_lead
+from database import address_already_active, init_db, save_lead
 from rehab import apply_tampa_risk_adjustments, shark_mao
 from skip_provider import _owner_from_prop
 from tampa_config import DEFAULT_CLOSING_COST_PCT, MIN_WHOLESALE_FEE
@@ -25,6 +25,62 @@ from tampa_config import DEFAULT_CLOSING_COST_PCT, MIN_WHOLESALE_FEE
 load_dotenv()
 
 RENTCAST_BASE = "https://api.rentcast.io/v1"
+
+# Corporate / SFR landlords — not mom-and-pop wholesale zombies
+_INSTITUTIONAL_NAME_MARKERS = (
+    " LLC",
+    " L.L.C",
+    " LP",
+    " L.P",
+    " INC",
+    " CORP",
+    " TRUST",
+    " BORROWER",
+    " SFR ",
+    "TRICON",
+    "INVITATION HOMES",
+    " IH BORROWER",
+    "PROGRESS RESIDENTIAL",
+    "AMH ",
+    "AMERICAN HOMES",
+    "FIRSTKEY",
+    "CERBERUS",
+    "BLACKSTONE",
+    "HOME PARTNERS",
+    "PROPERTY OWNER",
+    "HOLDINGS",
+    "INVESTMENTS",
+    "CAPITAL",
+    "FUND ",
+    " REIT",
+    "BANK ",
+    "N.A.",
+    "NATIONAL ASSOCIATION",
+    "FAMILY LAND",
+    "LAND TRUST",
+    "LIVING TRUST",
+)
+
+
+def is_institutional_owner(name: str) -> bool:
+    """True for LLC/LP/trust/SFR-REIT style owners — skip for zombie wholesale hunt."""
+    raw = (name or "").strip().upper()
+    if not raw:
+        return False
+    if "OWNER ON FILE" in raw:
+        return True
+    padded = f" {raw} "
+    for marker in _INSTITUTIONAL_NAME_MARKERS:
+        if marker.strip().upper() in raw or marker.upper() in padded:
+            # Require word-ish match for short tokens like LP / INC at end
+            m = marker.strip().upper()
+            if m in {"LLC", "L.L.C", "LP", "L.P", "INC", "CORP", "TRUST"}:
+                if raw.endswith(m) or f" {m} " in padded or raw.endswith(f" {m}"):
+                    return True
+                continue
+            if m in raw:
+                return True
+    return False
 
 
 def _headers() -> dict[str, str]:
@@ -37,6 +93,7 @@ def hunt_sellers(
     zip_code: str = "33615",
     limit: int = 25,
     absentee_only: bool = True,
+    skip_institutions: bool = True,
     property_type: str = "Single Family",
     fee: float = MIN_WHOLESALE_FEE,
     market_factor: float = 0.70,
@@ -45,7 +102,7 @@ def hunt_sellers(
 ) -> dict[str, Any]:
     """
     Query RentCast for properties in zip, score as seller leads, optionally save.
-    Returns {ok, leads, saved, error}.
+    Returns {ok, leads, saved, skipped_institutions, error}.
     """
     zip_code = (zip_code or "33615").strip()[:5]
     if not has_rentcast_key():
@@ -53,6 +110,7 @@ def hunt_sellers(
             "ok": False,
             "leads": [],
             "saved": 0,
+            "skipped_institutions": 0,
             "error": "Set RENTCAST_API_KEY to hunt live sellers.",
         }
 
@@ -69,18 +127,26 @@ def hunt_sellers(
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:
-        return {"ok": False, "leads": [], "saved": 0, "error": str(exc)}
+        return {
+            "ok": False,
+            "leads": [],
+            "saved": 0,
+            "skipped_institutions": 0,
+            "error": str(exc),
+        }
 
     if isinstance(payload, dict) and "error" in payload:
         return {
             "ok": False,
             "leads": [],
             "saved": 0,
+            "skipped_institutions": 0,
             "error": str(payload.get("message") or payload.get("error")),
         }
 
     rows = payload if isinstance(payload, list) else []
     leads: list[dict[str, Any]] = []
+    skipped_institutions = 0
 
     for prop in rows:
         owner_occupied = prop.get("ownerOccupied")
@@ -104,6 +170,11 @@ def hunt_sellers(
             continue
 
         owner_info = _owner_from_prop(prop, formatted)
+        owner_name = owner_info.get("owner_name") or ""
+        if skip_institutions and is_institutional_owner(owner_name):
+            skipped_institutions += 1
+            continue
+
         z = str(prop.get("zipCode") or extract_zip(formatted) or zip_code)[:5]
 
         last_sale = prop.get("lastSalePrice") or 0
@@ -147,7 +218,7 @@ def hunt_sellers(
             != (formatted.split(",")[0].strip().lower())
         )
         if vacant_proxy:
-            motive.append("Mailing ≠ subject (possible vacant)")
+            motive.append("Mailing != subject (possible vacant)")
 
         last_sale_f = float(last_sale or 0)
         equity_proxy = max(0.0, arv - last_sale_f) if last_sale_f else 0.0
@@ -168,7 +239,7 @@ def hunt_sellers(
             "fee": float(fee),
             "risk": hazard.get("risk_level") or "Standard",
             "flood_risk": bool(hazard.get("is_flood_zip")),
-            "seller_name": owner_info.get("owner_name") or "",
+            "seller_name": owner_name,
             "seller_phone": "",
             "mailing_address": mailing,
             "owner_occupied": owner_occupied,
@@ -188,9 +259,13 @@ def hunt_sellers(
         leads.append(lead)
 
     saved = 0
+    skipped_dupes = 0
     if save and leads:
         init_db()
         for lead in leads:
+            if address_already_active(lead["address"]):
+                skipped_dupes += 1
+                continue
             save_lead(
                 address=lead["address"],
                 zip_code=lead["zip_code"],
@@ -220,6 +295,8 @@ def hunt_sellers(
         "ok": True,
         "leads": leads,
         "saved": saved,
+        "skipped_institutions": skipped_institutions,
+        "skipped_dupes": skipped_dupes,
         "error": "",
         "queried": len(rows),
         "zip_code": zip_code,
@@ -237,7 +314,7 @@ def render_seller_factory(
     st.subheader("Seller Factory")
     st.caption(
         "Pulls live property + owner names from RentCast into your War Room. "
-        "This finds leads — you still call/text to create a deal. "
+        "Skips LLC / SFR / bank / trust owners by default (not mom-and-pop zombies). "
         "Cell phones are not in RentCast; paste mobiles when you get them."
     )
 
@@ -254,6 +331,12 @@ def render_seller_factory(
         rehab = st.number_input("Default rehab $", 5000, 100000, 25000, 1000, key="sf_rehab")
     with c4:
         absentee_only = st.checkbox("Absentee only", value=True, key="sf_absentee")
+    skip_institutions = st.checkbox(
+        "Skip LLC / institutional owners",
+        value=True,
+        key="sf_skip_inst",
+        help="Filters Invitation Homes, Tricon, banks, trusts, LLCs — keep people you can call.",
+    )
 
     if st.button("HUNT SELLERS → WAR ROOM", type="primary", use_container_width=True):
         with st.spinner(f"Hunting {zip_code}..."):
@@ -261,6 +344,7 @@ def render_seller_factory(
                 zip_code=zip_code.strip(),
                 limit=int(limit),
                 absentee_only=bool(absentee_only),
+                skip_institutions=bool(skip_institutions),
                 fee=float(fee),
                 market_factor=float(market_factor),
                 default_rehab=float(rehab),
@@ -269,9 +353,10 @@ def render_seller_factory(
         if not result.get("ok"):
             st.error(result.get("error") or "Hunt failed")
             return
+        skipped = int(result.get("skipped_institutions") or 0)
         st.success(
-            f"Found {len(result['leads'])} seller lead(s) from {result.get('queried', 0)} "
-            f"records · saved {result['saved']} to War Room."
+            f"Found {len(result['leads'])} people lead(s) from {result.get('queried', 0)} "
+            f"records · saved {result['saved']} · skipped {skipped} institutional."
         )
         if result["leads"]:
             st.dataframe(
