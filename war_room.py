@@ -20,6 +20,7 @@ from database import (
     daily_call_dashboard,
     get_all_leads,
     get_pending_leads,
+    is_do_not_contact,
     list_call_logs,
     list_queued_offers,
     log_call,
@@ -484,7 +485,7 @@ def render_war_room(buyer_name: str = "DealShark") -> None:
     def _render_lead_actions(r: dict) -> None:
         lid = int(r["id"])
         flood_tag = " · FLOOD" if r.get("flood_risk") else ""
-        dnc = bool(r.get("dnc_flag"))
+        dnc = is_do_not_contact(r)
         st.markdown(
             f"### #{lid} · {r.get('status')} · {r.get('address')} · "
             f"MAO ${float(r.get('mao') or 0):,.0f}{flood_tag} · "

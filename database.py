@@ -52,6 +52,12 @@ CALL_OUTCOMES = (
 )
 
 
+def is_do_not_contact(lead: dict[str, Any]) -> bool:
+    """True for both migrated DNC flags and legacy DNC status-only rows."""
+    status = str(lead.get("status") or "").strip().lower()
+    return bool(lead.get("dnc_flag")) or status == "do not contact"
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
